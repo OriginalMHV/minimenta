@@ -1,0 +1,12 @@
+[package]
+name = "minimenta"
+version = "0.1.0"
+edition = "2024"
+description = "Minuere impedimenta: an interactive disk usage analyzer for the terminal"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OriginalMHV/minimenta"
+readme = "README.md"
+keywords = ["disk", "usage", "ncdu", "tui", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
