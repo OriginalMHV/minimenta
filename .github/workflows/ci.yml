@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # GitHub's macOS runners have no endpoint security agent, so this measures
+  # the scanner itself rather than per-open inspection overhead.
+  benchmark:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install ncdu
+      - run: bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Profile system calls per directory
+        run: |
+          cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
+          "$RUNNER_TEMP/syscalls" "$RUNNER_TEMP/bench-tree" "$(sysctl -n hw.ncpu)" | tee -a "$GITHUB_STEP_SUMMARY"
