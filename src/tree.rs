@@ -84,7 +84,8 @@ pub struct Sort {
 pub struct Dir {
     pub names: Vec<u8>,
     pub entries: Vec<Entry>,
-    pub sort: Sort,
+    /// The order the entries are in. `None` means the order is stale.
+    pub sort: Option<Sort>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -159,7 +160,7 @@ impl Dir {
             let order = primary.then_with(|| by_name(a, b));
             if sort.reverse { order.reverse() } else { order }
         });
-        self.sort = sort;
+        self.sort = Some(sort);
     }
 }
 
@@ -189,12 +190,14 @@ impl Tree {
         d
     }
 
-    /// Recomputes the totals of every directory on `stack` after a change below it.
+    /// Recomputes the totals of every directory on `stack` after a change below
+    /// it. The sizes of the ancestors change, so their order becomes stale.
     pub fn refresh_totals(&mut self, stack: &[usize]) {
         fn refresh(dir: &mut Dir, stack: &[usize]) {
             let Some((&i, rest)) = stack.split_first() else {
                 return;
             };
+            dir.sort = None;
             let e = &mut dir.entries[i];
             let sub = e.dir.as_mut().expect("stack points to a directory");
             refresh(sub, rest);
@@ -252,6 +255,27 @@ mod tests {
                 items: 2
             }
         );
+    }
+
+    #[test]
+    fn refreshing_totals_marks_ancestor_order_as_stale() {
+        let mut sub = Dir::default();
+        sub.push(b"big", Kind::File, 100, 100, 0);
+        let mut root = Dir::default();
+        root.push(b"a", Kind::Dir, 0, 0, 0);
+        root.attach(0, sub, 0);
+        root.sort(Sort::default());
+        let mut tree = Tree {
+            path: PathBuf::from("/"),
+            dir: Box::new(root),
+        };
+
+        tree.dir_at_mut(&[0]).entries.clear();
+        tree.refresh_totals(&[0]);
+
+        assert_eq!(tree.dir.sort, None);
+        assert_eq!(tree.dir.entries[0].disk, 0);
+        assert_eq!(tree.dir.entries[0].items, 1);
     }
 
     #[test]

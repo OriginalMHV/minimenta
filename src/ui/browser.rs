@@ -256,7 +256,7 @@ impl Browser {
 
     /// Sorts the current directory if its order is stale.
     fn apply_sort(&mut self) {
-        if self.dir().sort != self.sort {
+        if self.dir().sort != Some(self.sort) {
             self.resort();
         }
     }
