@@ -10,3 +10,15 @@ keywords = ["disk", "usage", "ncdu", "tui", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+libc = "0.2.190"
+ratatui = "0.30.2"
+rayon = "1.12.0"
+trash = "5.2.9"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
