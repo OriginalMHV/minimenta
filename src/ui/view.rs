@@ -10,6 +10,10 @@ use crate::tree::{Dir, Entry, Kind, SortKey, flag, format_size};
 
 const BAR_WIDTH: usize = 10;
 
+/// The mint accent of the logo (#44B78F), as the closest 256-color index so it
+/// also works in terminals without true color.
+pub const ACCENT: Color = Color::Indexed(72);
+
 pub fn header_bar() -> Line<'static> {
     bar(&format!(
         " minimenta {} ~ Use the arrow keys to navigate, press ? for help",
@@ -125,13 +129,13 @@ fn row(
 
     let mut style = Style::default();
     if selected {
-        style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        style = style.fg(ACCENT).add_modifier(Modifier::BOLD);
     }
     if is_cursor {
         style = style.add_modifier(Modifier::REVERSED);
     }
-    let name_style = if e.kind == Kind::Dir && !selected {
-        style.fg(Color::Blue).bold()
+    let name_style = if e.kind == Kind::Dir {
+        style.bold()
     } else {
         style
     };
@@ -275,7 +279,7 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         (
             "Move to Trash",
             format!("Move {what} to the Trash?"),
-            Color::Yellow,
+            ACCENT,
         )
     };
     let shown = targets.len().min(6);
