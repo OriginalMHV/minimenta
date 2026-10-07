@@ -75,7 +75,7 @@ Press Esc during a scan to cancel it, or `q` to quit.
 
 ## Speed
 
-The goal is a scan that is 2x faster than ncdu at its best, which is `ncdu -t <cores>`. This work is in progress, and minimenta does not reach the goal yet.
+The goal is a scan that is 2x faster than ncdu at its best, which is `ncdu -t <cores>`. This work is in progress, and minimenta does not reach the goal yet. Today, 1.76x is the realistic number for one full scan on a Mac. It was measured on the CI runner that the caption below names.
 
 <p align="center">
   <img src="docs/assets/speed.svg" alt="Scan speed compared with ncdu -t 3: ncdu 1.00x, minimenta 1.76x, goal 2.00x. Median of 60 interleaved pairs from bench/throughput.sh in the CI benchmark job on a GitHub macOS runner with 3 cores." width="600">
