@@ -35,3 +35,8 @@ jobs:
         run: |
           cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
           "$RUNNER_TEMP/syscalls" "$RUNNER_TEMP/bench-tree" "$(sysctl -n hw.ncpu)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Sweep scan threads
+        run: |
+          hyperfine -N --warmup 3 --runs 30 -L t 2,3,4,6,8,12 --export-json "$RUNNER_TEMP/sweep.json" \
+            "./target/release/minimenta --summary -t {t} $RUNNER_TEMP/bench-tree" >/dev/null
+          jq -r '.results[] | "minimenta -t \(.parameters.t): median \(.median * 1000 | floor) ms"' "$RUNNER_TEMP/sweep.json" | tee -a "$GITHUB_STEP_SUMMARY"
