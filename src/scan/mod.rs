@@ -17,9 +17,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod generic;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use generic as platform;
 
 #[derive(Clone, Copy, Debug)]
@@ -124,7 +129,7 @@ fn child_path(parent: &[u8], name: &[u8]) -> CString {
     unsafe { CString::from_vec_unchecked(path) }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn as_path(path: &std::ffi::CStr) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()))
 }
