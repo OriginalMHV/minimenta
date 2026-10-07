@@ -24,8 +24,8 @@ captions=(
   "0 4.5|Run minimenta. Enter scans the folder in the prompt."
   "4.5 7.5|The largest items come first. Enter opens one."
   "7.5 11.75|Shift+Down or J selects a range of items."
-  "11.75 14.75|D deletes permanently after you confirm. d moves items to the Trash."
-  "14.75 99|The totals update at once."
+  "11.75 14.6|D deletes permanently after you confirm. d moves items to the Trash."
+  "14.6 99|The totals update at once."
 )
 
 inputs=(-i "$work/demo.mp4")
@@ -46,7 +46,7 @@ inputs+=(-loop 1 -t "$duration" -i "$work/mask.png")
 mask=$((${#captions[@]} + 1))
 last=${#captions[@]}
 filter+=";[${mask}:v]format=gray[m];[v${last}][m]alphamerge,fps=12,split[a][b]"
-filter+=";[a]palettegen=max_colors=64:reserve_transparent=1:stats_mode=full[p]"
+filter+=";[a]palettegen=max_colors=128:reserve_transparent=1:stats_mode=full[p]"
 filter+=";[b][p]paletteuse=dither=none:alpha_threshold=128"
 
 ffmpeg -v error -y "${inputs[@]}" -filter_complex "$filter" "$work/demo.gif"

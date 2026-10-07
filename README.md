@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/minimenta-hero.svg" alt="minimenta. scan, select, shed. Minuere impedimenta. Find what fills your disk, and let it go." width="100%">
+  <img src="docs/assets/minimenta-hero.svg" alt="minimenta. Minuere impedimenta. Find what fills your disk, and let it go." width="100%">
 </p>
 
 <p align="center">
