@@ -31,3 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: brew install ncdu hyperfine
       - run: bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Profile system calls per directory
+        run: |
+          cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
+          "$RUNNER_TEMP/syscalls" "$RUNNER_TEMP/bench-tree" "$(sysctl -n hw.ncpu)" | tee -a "$GITHUB_STEP_SUMMARY"
