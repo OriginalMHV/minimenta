@@ -78,10 +78,10 @@ Press Esc during a scan to cancel it, or `q` to quit.
 The goal is a scan that is 2x faster than ncdu at its best, which is `ncdu -t <cores>`. This work is in progress, and minimenta does not reach the goal yet.
 
 <p align="center">
-  <img src="docs/assets/speed.svg" alt="Scan speed compared with ncdu -t 3: ncdu 1.00x, minimenta 1.26x, goal 2.00x. Median of 3 rounds from bench/throughput.sh in the CI benchmark job on a GitHub macOS runner." width="600">
+  <img src="docs/assets/speed.svg" alt="Scan speed compared with ncdu -t 3: ncdu 1.00x, minimenta 1.76x, goal 2.00x. Median of 60 interleaved pairs from bench/throughput.sh in the CI benchmark job on a GitHub macOS runner with 3 cores." width="600">
 </p>
 
-[`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items with both tools. It runs 3 rounds of 30 runs and reports the median speedup. The CI benchmark job runs it on a GitHub macOS runner with 3 cores. The graphic shows the run for commit `8e62eb7`: the rounds measured 1.25x, 1.26x and 1.50x, and with one thread each minimenta was 1.66x faster. Earlier runs measured from 1.01x to 1.69x, because the speed of shared runners varies. To measure on your own machine, install ncdu, hyperfine and jq, then run `bench/throughput.sh`.
+[`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items with both tools. It runs the two commands in alternating pairs and reports the median time ratio, so a runner that slows down for a while affects both tools equally. The CI benchmark job runs it on a GitHub macOS runner with 3 cores. In the run for commit `3d78440`, minimenta took 28.4 ms and `ncdu -t 3` took 48.9 ms. The median ratio over 60 pairs was 1.76x, and the middle half of the pairs measured from 1.68x to 1.80x. With one thread each, minimenta was 1.80x faster. To measure on your own machine, install ncdu and Python 3, then run `bench/throughput.sh`.
 
 On macOS, minimenta reads each directory with one `getattrlistbulk(2)` call, which returns the names, types and sizes of all entries at once. ncdu calls `fstatat` for every file.
 
@@ -90,30 +90,30 @@ Endpoint security software (for example Microsoft Defender) inspects every direc
 ## minimenta compared with other tools
 
 <p align="center">
-  <img src="docs/assets/comparison.svg" alt="Comparison of minimenta, ncdu, gdu, dua-cli and dust. Interactive browser: all except dust. Parallel scan by default: all, ncdu partial. Select several items at once: minimenta, gdu and dua-cli. Move items to the Trash: minimenta, gdu and dua-cli, ncdu partial. Export the scan to a file: all except minimenta." width="100%">
+  <img src="docs/assets/comparison.svg" alt="Comparison of minimenta, ncdu, gdu, dua-cli and dust. Start prompt with the current folder: only minimenta. Range select with Shift+arrows: only minimenta. Select several items at once: minimenta, gdu and dua-cli. macOS Trash with Put Back: minimenta and dua-cli, partial in ncdu and gdu. Bulk reads on macOS with getattrlistbulk: minimenta and dua-cli." width="100%">
 </p>
 
-Compared on 2026-10-07 with each project's README, manual or source. Partial means that the tool does part of the row:
+Compared on 2026-10-07 with each project's README, manual, help screen or source. Partial means that the tool does part of the row:
 
-- ncdu scans in parallel only with `-t`. The default is one thread.
-- ncdu moves items to the Trash only through `--delete-command`, for example `ncdu --delete-command 'gio trash --'`.
+- ncdu and gdu reach the macOS Trash only through a custom command: `ncdu --delete-command` or `gdu --trash-command`. The built-in Trash of gdu does not support macOS.
+- dua-cli moves marked items to the Trash with the `trash` crate, which asks Finder by default, so "Put Back" works there too.
 
 <details>
 <summary>Comparison as text</summary>
 
 | Feature | minimenta | ncdu | gdu | dua-cli | dust |
 | --- | --- | --- | --- | --- | --- |
-| Interactive browser | Yes | Yes | Yes | Yes (`dua i`) | No |
-| Parallel scan by default | Yes | Partial (`-t`) | Yes | Yes | Yes |
+| Start prompt with the current folder | Yes | No (scans the current folder) | No (scans the current folder) | No (scans the current folder) | No |
+| Range select with Shift+arrows | Yes | No | No | No | No |
 | Select several items at once | Yes | No | Yes (Space) | Yes (Space) | No |
-| Move items to the Trash | Yes | Partial (`--delete-command`) | Yes (`D`) | Yes (Ctrl+T) | No |
-| Export the scan to a file | No | Yes (`-o`, `-O`) | Yes (`-o`) | Yes (`--export`) | Yes (`-j`) |
+| macOS Trash with Put Back | Yes | Partial (`--delete-command`) | Partial (`--trash-command`) | Yes (Ctrl+T) | No |
+| Bulk reads on macOS (`getattrlistbulk`) | Yes | No (`fstatat` per file) | No | Yes | No |
 
-Sources: the [ncdu manual](https://dev.yorhel.nl/ncdu/man) and [home page](https://dev.yorhel.nl/ncdu), the [gdu README](https://github.com/dundee/gdu) and its [help screen source](https://github.com/dundee/gdu/blob/master/tui/show.go), the [dua-cli README](https://github.com/Byron/dua-cli), [key bindings](https://github.com/Byron/dua-cli/blob/main/src/config.rs) and [options](https://github.com/Byron/dua-cli/blob/main/src/options.rs), and the [dust README](https://github.com/bootandy/dust).
+Sources: the [ncdu manual](https://dev.yorhel.nl/ncdu/man) and [scanner source](https://code.blicky.net/yorhel/ncdu/src/branch/zig/src/scan.zig), the [gdu README](https://github.com/dundee/gdu), [help screen](https://github.com/dundee/gdu/blob/master/tui/show.go) and [macOS Trash code](https://github.com/dundee/gdu/blob/master/pkg/remove/trash_darwin.go), the [dua-cli README](https://github.com/Byron/dua-cli), [key bindings](https://github.com/Byron/dua-cli/blob/main/src/config.rs), [options](https://github.com/Byron/dua-cli/blob/main/src/options.rs) and [Trash code](https://github.com/Byron/dua-cli/blob/main/src/interactive/app/deletion.rs), the [trash crate](https://github.com/Byron/trash-rs/blob/master/src/macos/mod.rs), and the [dust README](https://github.com/bootandy/dust). The bulk read cells come from a GitHub code search for `getattrlistbulk` in each repository.
 
 </details>
 
-dua-cli and gdu do more than minimenta, for example saved scans and more platforms. dust prints a tree and has no interactive mode. Choose minimenta when you want the ncdu look and keys together with multi-select and the Trash.
+dua-cli and gdu have features that minimenta does not have, for example saved scans, search and more platforms. dust prints a tree and has no interactive mode. Choose minimenta when you want the ncdu look and keys together with a start prompt, range selection and the Trash.
 
 ## Development
 
