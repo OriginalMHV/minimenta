@@ -40,3 +40,9 @@ printf 'median speedup over ncdu -t %d: %.2fx\n' "$threads" "$median"
 read -r mm nc < <(round 1)
 printf 'single thread: minimenta %.0f ms  ncdu %.0f ms  %.2fx\n' \
   "$(echo "$mm * 1000" | bc -l)" "$(echo "$nc * 1000" | bc -l)" "$(echo "$nc / $mm" | bc -l)"
+
+empty=$(mktemp -d)
+hyperfine -N --warmup 3 --runs 30 --export-json "$json" \
+  "$bin --summary $empty" "ncdu -0 -O /dev/null --no-compress $empty" >/dev/null 2>&1
+rmdir "$empty"
+jq -r '"startup (empty directory): minimenta \(.results[0].median * 10000 | floor / 10) ms  ncdu \(.results[1].median * 10000 | floor / 10) ms"' "$json"
