@@ -35,7 +35,8 @@ pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
     dir: &mut Dir,
-    subdirs: &mut Vec<usize>,
+    subdirs: &mut Vec<(usize, u32)>,
+    expected: u32,
 ) -> io::Result<()> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let fd = unsafe { libc::open(path.as_ptr(), flags) };
@@ -52,10 +53,11 @@ pub(super) fn read_dir(
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
         | libc::ATTR_CMN_FILEID;
-    attrs.dirattr = libc::ATTR_DIR_MOUNTSTATUS;
+    attrs.dirattr = libc::ATTR_DIR_ENTRYCOUNT | libc::ATTR_DIR_MOUNTSTATUS;
     attrs.fileattr =
         libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE | libc::ATTR_FILE_DATALENGTH;
 
+    let mut seen = 0;
     BUF.with_borrow_mut(|buf| {
         loop {
             let n = unsafe {
@@ -77,6 +79,7 @@ pub(super) fn read_dir(
             if n == 0 {
                 return Ok(());
             }
+            seen += n as u32;
             let mut p = buf.as_ptr().cast::<u8>();
             for _ in 0..n {
                 // SAFETY: the kernel wrote `n` packed entries, each starting with its length.
@@ -85,6 +88,11 @@ pub(super) fn read_dir(
                     add_entry(ctx, p, dir, subdirs);
                     p = p.add(len as usize);
                 }
+            }
+            // The parent listing told us how many entries to expect. Once we
+            // have them all, skip the extra call that would only return 0.
+            if expected > 0 && seen >= expected {
+                return Ok(());
             }
         }
     })
@@ -99,7 +107,7 @@ unsafe fn read<T: Copy>(p: *const u8, offset: usize) -> T {
 /// attributes and everything else carries the file attributes, never both.
 /// `FSOPT_PACK_INVAL_ATTRS` keeps every slot inside a group, so the offsets
 /// are fixed.
-unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<usize>) {
+unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<(usize, u32)>) {
     unsafe {
         let mut o = size_of::<u32>() + size_of::<libc::attribute_set_t>();
         let error: u32 = read(p, o);
@@ -121,11 +129,12 @@ unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<us
         o += 8;
 
         if objtype == VDIR {
-            let mount_status: u32 = read(p, o);
+            let entry_count: u32 = read(p, o);
+            let mount_status: u32 = read(p, o + 4);
             if ctx.one_fs && mount_status & DIR_MNTSTATUS_MNTPOINT != 0 {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
-                subdirs.push(dir.entries.len());
+                subdirs.push((dir.entries.len(), entry_count));
                 dir.push(name, Kind::Dir, 0, 0, 0);
             }
             return;

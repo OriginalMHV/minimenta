@@ -11,7 +11,8 @@ pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
     dir: &mut Dir,
-    subdirs: &mut Vec<usize>,
+    subdirs: &mut Vec<(usize, u32)>,
+    _expected: u32,
 ) -> io::Result<()> {
     for entry in fs::read_dir(as_path(path))? {
         let entry = entry?;
@@ -26,7 +27,7 @@ pub(super) fn read_dir(
             if ctx.one_fs && meta.dev() != ctx.root_dev {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
-                subdirs.push(dir.entries.len());
+                subdirs.push((dir.entries.len(), 0));
                 dir.push(name, Kind::Dir, 0, 0, 0);
             }
             continue;

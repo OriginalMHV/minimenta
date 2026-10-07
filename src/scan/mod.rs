@@ -71,7 +71,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = CString::new(path.as_os_str().as_bytes())?;
-    let (dir, result) = pool.install(|| scan_dir(&ctx, root));
+    let (dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
     if progress.cancel.load(Relaxed) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
@@ -81,13 +81,14 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     }
 }
 
-fn scan_dir(ctx: &Ctx, path: CString) -> (Dir, io::Result<()>) {
+/// `expected` is the entry count from the parent listing, or 0 when unknown.
+fn scan_dir(ctx: &Ctx, path: CString, expected: u32) -> (Dir, io::Result<()>) {
     let mut dir = Dir::default();
     if ctx.progress.cancel.load(Relaxed) {
         return (dir, Ok(()));
     }
     let mut subdirs = Vec::new();
-    let result = platform::read_dir(ctx, &path, &mut dir, &mut subdirs);
+    let result = platform::read_dir(ctx, &path, &mut dir, &mut subdirs, expected);
     if result.is_err() {
         ctx.progress.errors.fetch_add(1, Relaxed);
     }
@@ -100,9 +101,11 @@ fn scan_dir(ctx: &Ctx, path: CString) -> (Dir, io::Result<()>) {
         let parent = path.as_bytes();
         let scanned: Vec<_> = subdirs
             .par_iter()
-            .map(|&i| scan_dir(ctx, child_path(parent, dir.name(&dir.entries[i]))))
+            .map(|&(i, expected)| {
+                scan_dir(ctx, child_path(parent, dir.name(&dir.entries[i])), expected)
+            })
             .collect();
-        for (&i, (sub, result)) in subdirs.iter().zip(scanned) {
+        for (&(i, _), (sub, result)) in subdirs.iter().zip(scanned) {
             dir.attach(i, sub, if result.is_err() { flag::ERROR } else { 0 });
         }
     }
