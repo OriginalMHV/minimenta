@@ -128,6 +128,7 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
         })
         .build()
         .map_err(io::Error::other)?;
+    let used = std::sync::atomic::AtomicU64::new(0);
     let parts: Vec<io::Result<Part>> = pool.install(|| {
         tasks
             .par_iter()
@@ -141,6 +142,7 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
                     read_at(&volume, bytes, task.offset)?;
                     progress.disk.fetch_add(task.len, Relaxed);
                     let mut part = Part::default();
+                    let mut in_use = 0;
                     for (i, record) in bytes.chunks_exact_mut(boot.record_size).enumerate() {
                         let index = task.first + i as u64;
                         if index >= total {
@@ -150,8 +152,10 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
                             && let Some(parsed) = parse_record(record)
                         {
                             part.add(index as u32, &parsed);
+                            in_use += u64::from(parsed.in_use);
                         }
                     }
+                    used.fetch_add(in_use, Relaxed);
                     Ok(part)
                 },
             )
@@ -166,7 +170,8 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
     let dir = table.build(root_record, progress);
     if profile {
         eprintln!(
-            "mft: {total} records ({} MiB), read and parse {:.0} ms, merge {:.0} ms, build {:.0} ms",
+            "mft: {total} records ({} in use, {} MiB), read and parse {:.0} ms, merge {:.0} ms, build {:.0} ms",
+            used.load(Relaxed),
             size >> 20,
             read.as_secs_f64() * 1e3,
             (merged - read).as_secs_f64() * 1e3,
