@@ -1,0 +1,120 @@
+name: Bug Report
+description: Report something that does not work correctly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not use this form for a security problem. Send a [private report](https://github.com/OriginalMHV/minimenta/security/advisories/new) instead.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: The smallest set of steps that shows the bug.
+      placeholder: |
+        1. Run `mm ~/code`
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What happened instead? Include the error output.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: minimenta Version
+      description: The output of `minimenta --version`.
+      placeholder: "minimenta 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install minimenta?
+      options:
+        - Homebrew
+        - cargo install
+        - Shell or PowerShell installer
+        - Archive from the GitHub release
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: Include the version and the CPU type.
+      placeholder: "macOS 15.3 (Apple silicon), Ubuntu 24.04 (x86-64), Windows 11 (x86-64)"
+    validations:
+      required: true
+
+  - type: input
+    id: filesystem
+    attributes:
+      label: File System
+      description: The file system of the scanned folder. Say if it is a network share or an external disk.
+      placeholder: "APFS, ext4, btrfs, XFS, NTFS, exFAT, NFS, SMB"
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command that you ran, with all options.
+      placeholder: "mm -x -t 8 ~/code"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: privileges
+    attributes:
+      label: Privileges
+      description: Did you run minimenta as an administrator or as root? On Windows, an administrator makes minimenta read the NTFS master file table.
+      options:
+        - Normal user
+        - Administrator or root
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: The terminal program, if the problem is about the display or the keys.
+      placeholder: "Terminal.app, iTerm2, Windows Terminal, GNOME Terminal"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Anything else that helps, for example the size of the tree, screenshots, or a recording.
+    validations:
+      required: false
