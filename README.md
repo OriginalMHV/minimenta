@@ -45,7 +45,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/OriginalMHV/minimenta/r
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.ps1 | iex"
 ```
 
-You can also download an archive for your system from the [releases page](https://github.com/OriginalMHV/minimenta/releases). Each archive holds both commands.
+The installer scripts put both commands in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) and add that folder to your `PATH`. You can also download an archive for your system from the [releases page](https://github.com/OriginalMHV/minimenta/releases). Each archive holds both commands.
 
 `cargo install` needs Rust 1.88 or newer and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`. To install the latest commit instead of a release, run `cargo install --git https://github.com/OriginalMHV/minimenta`.
 
