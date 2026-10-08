@@ -194,18 +194,29 @@ fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
     (ok && until_nul(&fs_name) == "NTFS".encode_utf16().collect::<Vec<_>>()).then_some(mount)
 }
 
-/// Whether `root` is on an NTFS volume, whose MFT an administrator can read.
-pub(super) fn on_ntfs(root: &Path) -> bool {
+/// Whether running minimenta elevated would let it read the MFT of the
+/// volume that holds `root`.
+pub(super) fn elevation_helps(root: &Path) -> bool {
+    token_elevation().is_some_and(|kind| elevation_helps_with(kind, || on_ntfs(root)))
+}
+
+/// An elevated run helps only an administrator whose token UAC limited: a
+/// standard user cannot elevate, and an elevated process already reads the
+/// MFT. Only NTFS has an MFT.
+fn elevation_helps_with(kind: TOKEN_ELEVATION_TYPE, ntfs: impl FnOnce() -> bool) -> bool {
+    kind == TokenElevationTypeLimited && ntfs()
+}
+
+fn on_ntfs(root: &Path) -> bool {
     ntfs_mount_point(root).is_some()
 }
 
-/// Whether the process runs for an administrator whose token UAC limited.
-/// The same user can start minimenta elevated, and then it reads the MFT.
-pub(super) fn limited_administrator() -> bool {
+/// The elevation type of the token of this process.
+fn token_elevation() -> Option<TOKEN_ELEVATION_TYPE> {
     let mut token = ptr::null_mut();
     // SAFETY: the pseudo handle of the current process needs no closing.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
-        return false;
+        return None;
     }
     // SAFETY: the token handle is valid and is closed on drop.
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
@@ -221,7 +232,7 @@ pub(super) fn limited_administrator() -> bool {
             &raw mut len,
         )
     };
-    ok != 0 && kind == TokenElevationTypeLimited
+    (ok != 0).then_some(kind)
 }
 
 /// Opens the NTFS volume that holds `root` for reading, or returns `None`
@@ -318,6 +329,7 @@ mod tests {
     use crate::scan::Options;
     use crate::tree::Kind;
     use std::fs;
+    use windows_sys::Win32::Security::{TokenElevationTypeDefault, TokenElevationTypeFull};
 
     /// One line per entry with its path, kind and sizes, sorted. Directories
     /// show no sizes and flags are left out: the directory listing has no link
@@ -391,17 +403,25 @@ mod tests {
         );
     }
 
-    /// Windows needs NTFS for its system volume. A process that can open a
-    /// volume has a full token, so it never shows the hint to run elevated.
     #[test]
-    fn the_hint_to_run_elevated_needs_ntfs_and_a_limited_token() {
+    fn only_a_limited_administrator_on_ntfs_gets_the_hint() {
+        assert!(elevation_helps_with(TokenElevationTypeLimited, || true));
+        assert!(!elevation_helps_with(TokenElevationTypeLimited, || false));
+        assert!(!elevation_helps_with(TokenElevationTypeFull, || true));
+        assert!(!elevation_helps_with(TokenElevationTypeDefault, || true));
+    }
+
+    /// Windows needs NTFS for its system volume. A process that can open a
+    /// volume has a full token, so it never gets the hint.
+    #[test]
+    fn a_process_that_reads_the_volume_never_gets_the_hint() {
         let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         assert!(on_ntfs(&system));
+        assert!(token_elevation().is_some());
         let tmp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
         if open_volume(&root).is_some() {
-            assert!(on_ntfs(&root));
-            assert!(!limited_administrator());
+            assert!(!elevation_helps(&root));
         }
     }
 

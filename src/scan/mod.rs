@@ -190,7 +190,7 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
             let result = mft::scan(path, opts.threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {
                 stop_listing.store(true, Relaxed);
-            } else if mft::limited_administrator() && mft::on_ntfs(path) {
+            } else if mft::elevation_helps(path) {
                 progress.elevate.store(true, Relaxed);
             }
             result

@@ -36,7 +36,7 @@ pub enum Source {
 }
 
 /// Shown after a `ScannedNotElevated` scan.
-pub const ELEVATE_HINT: &str = "Run as administrator to read the NTFS master file table, about 2x to 3.5x faster on a cold disk.";
+pub const ELEVATE_HINT: &str = "Run as administrator to read the NTFS master file table, which is often several times faster on a cold disk.";
 
 pub struct Scan {
     pub dir: Dir,
