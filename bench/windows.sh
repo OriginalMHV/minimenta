@@ -13,6 +13,6 @@ py=${PY:-python}
 cargo build --release -q
 echo "$($bin --summary "$tree")"
 echo "-- warm: A = minimenta, B = gdu (defaults)"
-$py -I bench/interleave.py "$pairs" "$bin --summary $tree" "$GDU -n -p -c $tree"
+$py -I bench/interleave.py "$pairs" "$bin --summary '$tree'" "$GDU -n -p -c '$tree'"
 echo "-- warm: A = minimenta, B = dua-cli (defaults)"
-$py -I bench/interleave.py "$pairs" "$bin --summary $tree" "$DUA $tree"
+$py -I bench/interleave.py "$pairs" "$bin --summary '$tree'" "$DUA '$tree'"
