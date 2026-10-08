@@ -164,21 +164,8 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     let listed = reported.len();
 
     let before = (dir.totals(), error_count(&dir));
-    refresh_dirs(&dir, root, &mut changes);
-    if changes.len() > MAX_CHANGES {
-        return None;
-    }
-    let refs: Vec<_> = changes
-        .iter()
-        .map(|(path, recursive)| crate::scan::Change {
-            path,
-            recursive: *recursive,
-        })
-        .collect();
-    match crate::scan::update(&mut dir, root, &refs, opts, progress) {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Some(Err(e)),
-        Err(_) => return None,
+    if let Err(e) = apply(&mut dir, root, changes, opts, progress)? {
+        return Some(Err(e));
     }
     let changed = listed > 0 || (dir.totals(), error_count(&dir)) != before;
     let stale_file = now().saturating_sub(header.saved_at) > RESAVE_SECS;
@@ -201,28 +188,92 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     }))
 }
 
-/// Adds the directories that FSEvents cannot report on:
+/// Lists the changed folders again, and the folders that FSEvents cannot
+/// report on. Returns `None` when a full scan is simpler or needed.
+#[cfg(target_os = "macos")]
+fn apply(
+    dir: &mut Dir,
+    root: &Path,
+    mut changes: Vec<(PathBuf, bool)>,
+    opts: &Options,
+    progress: &Progress,
+) -> Option<io::Result<()>> {
+    let mut linked = Vec::new();
+    refresh_dirs(dir, root, &mut changes, &mut linked);
+    if changes.len() > MAX_CHANGES {
+        return None;
+    }
+    let found_links = match list_again(dir, root, &changes, opts, progress) {
+        Ok(found) => found,
+        Err(e) => return (e.kind() == io::ErrorKind::Interrupted).then_some(Err(e)),
+    };
+    if changes.is_empty() {
+        return Some(Ok(()));
+    }
+    // Every link of a file must be found again in one pass, so it counts
+    // once. That pass is needed when the listing found hard links, or when a
+    // folder with hard links went away or lost them. Deleting one link sends
+    // no event for the others.
+    let mut now_linked = Vec::new();
+    refresh_dirs(dir, root, &mut Vec::new(), &mut now_linked);
+    linked.sort();
+    now_linked.sort();
+    if found_links || now_linked != linked {
+        if now_linked.len() > MAX_CHANGES {
+            return None;
+        }
+        let all: Vec<_> = now_linked.into_iter().map(|p| (p, false)).collect();
+        if let Err(e) = list_again(dir, root, &all, opts, progress) {
+            return (e.kind() == io::ErrorKind::Interrupted).then_some(Err(e));
+        }
+    }
+    Some(Ok(()))
+}
+
+/// Adds the directories that FSEvents cannot report on to `out`:
 /// - folders that could not be read (granting Full Disk Access sends no event),
-/// - directories with entries that failed,
-/// - directories with hard-linked files, so all links are counted once again
-///   in the same pass (deleting one link sends no event for the others).
-fn refresh_dirs(dir: &Dir, path: &Path, out: &mut Vec<(PathBuf, bool)>) {
-    let mut relist = false;
+/// - directories with entries that failed.
+///
+/// Adds the directories with hard-linked files to `linked`. Deleting one link
+/// sends no event for the others.
+fn refresh_dirs(dir: &Dir, path: &Path, out: &mut Vec<(PathBuf, bool)>, linked: &mut Vec<PathBuf>) {
+    let (mut failed, mut multi_link) = (false, false);
     for e in &dir.entries {
         if e.kind == Kind::Dir {
             let child = path.join(crate::tree::os_name(dir.name(e)));
             if e.has(flag::ERROR) {
                 out.push((child, true));
             } else if let Some(sub) = &e.dir {
-                refresh_dirs(sub, &child, out);
+                refresh_dirs(sub, &child, out, linked);
             }
-        } else if e.has(flag::MULTI_LINK | flag::ERROR) {
-            relist = true;
+        } else {
+            failed |= e.has(flag::ERROR);
+            multi_link |= e.has(flag::MULTI_LINK);
         }
     }
-    if relist {
+    if failed {
         out.push((path.to_path_buf(), false));
     }
+    if multi_link {
+        linked.push(path.to_path_buf());
+    }
+}
+
+fn list_again(
+    dir: &mut Dir,
+    root: &Path,
+    changes: &[(PathBuf, bool)],
+    opts: &Options,
+    progress: &Progress,
+) -> io::Result<bool> {
+    let refs: Vec<_> = changes
+        .iter()
+        .map(|(path, recursive)| crate::scan::Change {
+            path,
+            recursive: *recursive,
+        })
+        .collect();
+    crate::scan::update(dir, root, &refs, opts, progress)
 }
 
 fn error_count(dir: &Dir) -> usize {
@@ -1109,6 +1160,96 @@ mod tests {
             fs::create_dir_all(f.root.join("b")).unwrap();
             fs::hard_link(f.root.join("a/f.bin"), f.root.join("b/g.bin")).unwrap();
             check(&f.root, || fs::remove_file(f.root.join("a/f.bin")).unwrap());
+        }
+
+        /// Writes the cache, applies `change`, and returns the cached result
+        /// with the number of items listed again.
+        fn cached_after(root: &Path, change: impl FnOnce()) -> (Scan, u64) {
+            std::thread::sleep(Duration::from_millis(1500));
+            let _ = fs::remove_file(file_for(root).unwrap());
+            scan(root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let (header, _) = load(root).expect("the first scan writes the cache");
+            change();
+            settle(root, header.event_id);
+            let progress = Progress::default();
+            let cached = scan(root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(cached.source, Source::Cached { .. }));
+            (
+                cached,
+                progress.items.load(std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        #[test]
+        fn a_change_elsewhere_does_not_list_hard_linked_folders_again() {
+            let f = fixture();
+            write(&f.root, "a/f.bin", 700_000);
+            fs::create_dir_all(f.root.join("b")).unwrap();
+            fs::hard_link(f.root.join("a/f.bin"), f.root.join("b/g.bin")).unwrap();
+            write(&f.root, "c/x.bin", 10);
+
+            let (cached, listed) = cached_after(&f.root, || write(&f.root, "c/y.bin", 10));
+
+            assert_eq!(listed, 2, "only the two files in c are listed again");
+            let fresh = crate::scan::scan(&f.root, &opts(), &Progress::default()).unwrap();
+            assert_eq!(cached.dir.totals(), fresh.totals());
+        }
+
+        #[test]
+        fn a_change_in_the_root_does_not_list_hard_linked_folders_again() {
+            let f = fixture();
+            write(&f.root, "a/f.bin", 700_000);
+            fs::create_dir_all(f.root.join("b")).unwrap();
+            fs::hard_link(f.root.join("a/f.bin"), f.root.join("b/g.bin")).unwrap();
+
+            let (cached, listed) = cached_after(&f.root, || write(&f.root, "new.bin", 10));
+
+            assert_eq!(listed, 3, "only the root is listed again");
+            assert_eq!(cached.dir.totals().apparent, 700_010);
+        }
+
+        #[test]
+        fn moving_the_counted_link_out_of_the_root_counts_the_other_one() {
+            let f = fixture();
+            write(&f.root, "a/f.bin", 700_000);
+            fs::create_dir_all(f.root.join("b")).unwrap();
+            fs::hard_link(f.root.join("a/f.bin"), f.root.join("b/g.bin")).unwrap();
+            write(&f.root, "c/x.bin", 10);
+
+            let (cached, _) = cached_after(&f.root, || {
+                let (_, tree) = load(&f.root).unwrap();
+                let counted = ["a", "b"]
+                    .into_iter()
+                    .find(|name| {
+                        let sub = tree.entries[tree.find(name.as_bytes()).unwrap()]
+                            .dir
+                            .as_ref();
+                        sub.unwrap().entries.iter().any(|e| !e.has(flag::HARDLINK))
+                    })
+                    .unwrap();
+                fs::rename(f.root.join(counted), f.tmp.path().join("moved")).unwrap();
+            });
+
+            assert_eq!(cached.dir.totals().apparent, 700_010);
+        }
+
+        #[test]
+        fn a_new_link_in_a_folder_without_links_counts_once() {
+            let f = fixture();
+            write(&f.root, "a/f.bin", 700_000);
+            fs::create_dir_all(f.root.join("b")).unwrap();
+            fs::hard_link(f.root.join("a/f.bin"), f.root.join("b/g.bin")).unwrap();
+            write(&f.root, "c/x.bin", 10);
+
+            let (cached, _) = cached_after(&f.root, || {
+                fs::hard_link(f.root.join("a/f.bin"), f.root.join("c/h.bin")).unwrap();
+            });
+
+            let fresh = crate::scan::scan(&f.root, &opts(), &Progress::default()).unwrap();
+            assert_eq!(cached.dir.totals(), fresh.totals());
+            assert_eq!(cached.dir.totals().apparent, 700_010);
         }
 
         #[test]

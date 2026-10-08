@@ -284,8 +284,8 @@ pub struct Change<'a> {
 
 /// Updates a cached tree in place. Each changed directory is listed again,
 /// one level deep. Unchanged subdirectories keep their cached subtrees, and new
-/// subdirectories are scanned completely. Returns the number of directories
-/// listed again.
+/// subdirectories are scanned completely. Returns whether the listing found
+/// files with more than one hard link.
 ///
 /// Fails when the root cannot be listed again, so the caller can scan fully.
 ///
@@ -300,7 +300,7 @@ pub fn update(
     changes: &[Change],
     opts: &Options,
     progress: &Progress,
-) -> io::Result<usize> {
+) -> io::Result<bool> {
     let meta = fs::metadata(root)?;
     let ctx = Ctx {
         one_fs: opts.one_fs,
@@ -340,7 +340,6 @@ pub fn update(
     });
 
     let native_root = native(root)?;
-    let mut listed = 0;
     pool.install(|| {
         for (components, recursive) in &targets {
             if ctx.stopped() {
@@ -371,7 +370,6 @@ pub fn update(
                 }
                 None => result?,
             }
-            listed += 1;
         }
         Ok::<_, io::Error>(())
     })?;
@@ -380,7 +378,7 @@ pub fn update(
     }
     fix_totals(dir);
     dir.sort(Sort::default());
-    Ok(listed)
+    Ok(!ctx.hardlinks.lock().unwrap().is_empty())
 }
 
 /// The path components of `path` below `root`, or `None` when it is outside.
