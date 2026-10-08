@@ -215,7 +215,9 @@ fn open_volume(root: &Path) -> Option<File> {
         device.pop();
     }
     device.push(0);
-    flush(&device);
+    if std::env::var_os("MINIMENTA_MFT_NOFLUSH").is_none() {
+        flush(&device);
+    }
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     // Unbuffered: the table goes straight into our aligned buffers, and does
     // not fill the file cache with data that is read once.

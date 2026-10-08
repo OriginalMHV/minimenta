@@ -154,7 +154,23 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
     let mft_progress = Progress::default();
     std::thread::scope(|s| {
         let reader = s.spawn(|| {
-            let result = mft::scan(path, opts.threads, &mft_progress);
+            // Temporary experiment switches, to be replaced by fixed values.
+            let env = |name: &str, default: u64| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default)
+            };
+            let delay = std::time::Duration::from_millis(env("MINIMENTA_MFT_DELAY_MS", 0));
+            let threads = env("MINIMENTA_MFT_THREADS", opts.threads as u64) as usize;
+            let deadline = std::time::Instant::now() + delay;
+            while std::time::Instant::now() < deadline {
+                if mft_progress.cancel.load(Relaxed) {
+                    return Ok(None);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let result = mft::scan(path, threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {
                 stop_listing.store(true, Relaxed);
             }
