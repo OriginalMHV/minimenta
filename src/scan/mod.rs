@@ -148,10 +148,16 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
 /// of the whole volume (about 3 s for a 1.3 GB table), so a listing wins for
 /// small or warm folders, and the MFT wins on a cold disk, where a listing
 /// waits for thousands of small reads.
-/// Measured on a 4-core runner: a 250 ms delay removed the race overhead on
-/// a small warm tree and cost 0.25 s on a cold `C:\Program Files` (4 s).
+/// The MFT reader starts only after this delay, and only while the listing
+/// is slower than `MFT_START_RATE`. On the Windows runner, a warm listing of
+/// `C:\Program Files` ran at about 460,000 items/s and a cold one at about
+/// 18,000 items/s. Starting the reader on a warm disk costs about 20%, and
+/// not starting it on a cold disk costs 3x to 5x, so the threshold leans
+/// towards starting.
 #[cfg(windows)]
 const MFT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+#[cfg(windows)]
+const MFT_START_RATE: f64 = 150_000.0;
 
 #[cfg(windows)]
 fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
@@ -159,14 +165,19 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
     let mft_progress = Progress::default();
     std::thread::scope(|s| {
         let reader = s.spawn(|| {
-            // Small or warm folders are often listed before this delay ends,
-            // so they pay nothing for the race.
-            let deadline = std::time::Instant::now() + MFT_DELAY;
-            while std::time::Instant::now() < deadline {
+            // Small or warm folders finish, or list fast enough, before the
+            // reader starts, so they pay nothing for the race.
+            let started = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(25));
                 if mft_progress.cancel.load(Relaxed) {
                     return Ok(None);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                let elapsed = started.elapsed();
+                let rate = progress.items.load(Relaxed) as f64 / elapsed.as_secs_f64();
+                if elapsed >= MFT_DELAY && rate < MFT_START_RATE {
+                    break;
+                }
             }
             let result = mft::scan(path, opts.threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {

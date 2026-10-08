@@ -110,25 +110,10 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
         index += run_bytes / record_size;
     }
 
-    // Temporary timing printout to find the cost of each phase.
-    let profile = std::env::var_os("MINIMENTA_PROFILE").is_some();
-    let started = std::time::Instant::now();
-    // Temporary experiment: background priority lowers the CPU and I/O
-    // priority of the reader threads, so a racing listing comes first.
-    let background = std::env::var_os("MINIMENTA_MFT_BACKGROUND").is_some();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .start_handler(move |_| {
-            if background {
-                use windows_sys::Win32::System::Threading::{
-                    GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-                };
-                unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
-            }
-        })
         .build()
         .map_err(io::Error::other)?;
-    let used = std::sync::atomic::AtomicU64::new(0);
     let parts: Vec<io::Result<Part>> = pool.install(|| {
         tasks
             .par_iter()
@@ -142,7 +127,6 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
                     read_at(&volume, bytes, task.offset)?;
                     progress.disk.fetch_add(task.len, Relaxed);
                     let mut part = Part::default();
-                    let mut in_use = 0;
                     for (i, record) in bytes.chunks_exact_mut(boot.record_size).enumerate() {
                         let index = task.first + i as u64;
                         if index >= total {
@@ -152,33 +136,18 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
                             && let Some(parsed) = parse_record(record)
                         {
                             part.add(index as u32, &parsed);
-                            in_use += u64::from(parsed.in_use);
                         }
                     }
-                    used.fetch_add(in_use, Relaxed);
                     Ok(part)
                 },
             )
             .collect()
     });
-    let read = started.elapsed();
     let mut table = Table::with_capacity(capacity);
     for part in parts {
         table.merge(part?);
     }
-    let merged = started.elapsed();
-    let dir = table.build(root_record, progress);
-    if profile {
-        eprintln!(
-            "mft: {total} records ({} in use, {} MiB), read and parse {:.0} ms, merge {:.0} ms, build {:.0} ms",
-            used.load(Relaxed),
-            size >> 20,
-            read.as_secs_f64() * 1e3,
-            (merged - read).as_secs_f64() * 1e3,
-            (started.elapsed() - merged).as_secs_f64() * 1e3
-        );
-    }
-    Ok(Some(dir))
+    Ok(Some(table.build(root_record, progress)))
 }
 
 fn wide(path: &Path) -> Vec<u16> {

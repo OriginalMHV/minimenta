@@ -97,6 +97,6 @@ jobs:
           python -I bench/gen_tree.py "$t/bench-tree"
           export GDU="$t/tools/gdu_windows_amd64.exe" DUA="$t/tools/dua.exe"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          bench/windows-race.sh "$t/bench-tree" 30 0 | tee -a "$GITHUB_STEP_SUMMARY"
-          bench/windows-race.sh "C:/Program Files" 10 3 | tee -a "$GITHUB_STEP_SUMMARY"
+          bench/windows.sh "$t/bench-tree" 30 | tee -a "$GITHUB_STEP_SUMMARY"
+          COLD_PAIRS=3 bench/windows.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

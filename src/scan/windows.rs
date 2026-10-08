@@ -68,7 +68,7 @@ pub(super) fn read_dir(
     // The full class leaves out the 8.3 short name, which NTFS may have to
     // look up in the file record of every entry. File systems without the
     // class get the class with file IDs and short names.
-    let mut full = !both_names_only();
+    let mut full = true;
     BUF.with_borrow_mut(|buf| {
         loop {
             let class = if full {
@@ -144,13 +144,6 @@ pub(super) fn read_dir(
             }
         }
     })
-}
-
-/// Temporary experiment switch: `MINIMENTA_DIR_INFO=both` uses the class
-/// with short names, to compare it with the full class.
-fn both_names_only() -> bool {
-    static BOTH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *BOTH.get_or_init(|| std::env::var("MINIMENTA_DIR_INFO").is_ok_and(|v| v == "both"))
 }
 
 /// # Safety
