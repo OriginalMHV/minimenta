@@ -17,7 +17,8 @@ minimenta is an interactive disk usage analyzer for the terminal, written in Rus
 - **Multi-select.** Space selects one item. Shift+Up/Down (or `K`/`J`) selects a range. Ctrl+A selects all items in the folder, and Esc clears the selection.
 - **The Trash first.** `d` moves the selection to the Trash. On macOS, minimenta asks Finder to do it, so "Put Back" works. If Finder cannot be controlled, minimenta uses the file manager API instead. `D` deletes permanently. Both keys ask for confirmation first.
 - **The ncdu look and keys.** The same layout, size bars, file flags, sort keys and `-x` option. The keys that both tools have work the same, except `d`, which moves items to the Trash.
-- **Bulk directory reads.** On macOS, one `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. A parallel scanner reads directories on all cores.
+- **A fast first scan.** At least 16 threads and, on macOS, bulk directory reads with `getattrlistbulk(2)`. On a cold disk, minimenta scans about 4x to 5x faster than ncdu with its defaults. See [Speed](#speed).
+- **Fast repeat scans on macOS.** minimenta keeps the last scan and lists again only the folders that FSEvents reports as changed.
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="Terminal recording: the start prompt scans the home folder, Downloads opens, J (the same as Shift+Down) selects three large files, D and y delete them, and the Downloads total drops from 4.0 GiB to 782 MiB" width="100%">
@@ -68,24 +69,43 @@ Press Esc during a scan to cancel it, or `q` to quit.
 | Option | Effect |
 | --- | --- |
 | `-x`, `--one-file-system` | Do not cross file system boundaries |
-| `-t N`, `--threads N` | Use N scan threads (default: the number of CPU cores) |
+| `-t N`, `--threads N` | Use N scan threads (default: the number of CPU cores, at least 16) |
+| `--no-cache` | Scan everything, and do not read or write the cache (macOS) |
+| `--cache` | Use the cache together with `--summary`, which scans everything by default |
 | `--summary` | Scan, print the totals, and exit |
 | `-h`, `--help` | Print the help |
 | `-V`, `--version` | Print the version |
 
 ## Speed
 
-The goal is a scan that is 2x faster than ncdu at its best, which is `ncdu -t <cores>`. This work is in progress, and minimenta does not reach the goal yet. Today, 1.76x is the realistic number for one full scan on a Mac. It was measured on the CI runner that the caption below names.
+You usually open a disk analyzer because the disk is full. Many folders have not been read for a long time, so the first scan finds a cold disk. That scan is the one that matters most, so the numbers below measure it.
 
 <p align="center">
-  <img src="docs/assets/speed.svg" alt="Scan speed compared with ncdu -t 3: ncdu 1.00x, minimenta 1.76x, goal 2.00x. Median of 60 interleaved pairs from bench/throughput.sh in the CI benchmark job on a GitHub macOS runner with 3 cores." width="600">
+  <img src="docs/assets/speed.svg" alt="First scan of a cold disk, speed relative to ncdu with its default settings. macOS: minimenta 5.3x, ncdu -t 64 4.6x, ncdu 1.0x. Linux: minimenta 4.5x, ncdu -t 64 4.7x, ncdu 1.0x. File cache dropped before every run, interleaved runs on CI runners: macOS with 3 cores on /System/Library (427,124 items), Linux with 4 cores on /usr (737,881 items)." width="600">
 </p>
 
-[`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items with both tools. It runs the two commands in alternating pairs and reports the median time ratio, so a runner that slows down for a while affects both tools equally. The CI benchmark job runs it on a GitHub macOS runner with 3 cores. In the run for commit `3d78440`, minimenta took 28.4 ms and `ncdu -t 3` took 48.9 ms. The median ratio over 60 pairs was 1.76x, and the middle half of the pairs measured from 1.68x to 1.80x. With one thread each, minimenta was 1.80x faster. To measure on your own machine, install ncdu and Python 3, then run `bench/throughput.sh`.
+| Comparison | macOS | Linux |
+| --- | --- | --- |
+| Cold disk, against ncdu with its defaults (1 thread) | 5.3x faster | 4.5x faster |
+| Cold disk, against ncdu at its fastest cold setting (`-t 64`) | 1.17x faster | about even (0.95x) |
+| Warm cache, against ncdu at its best (`-t <cores>`) | 1.5x to 1.8x faster | about even (1.05x) |
+| Repeat scan of a folder with the cache (macOS only) | 0.05 s instead of 2 to 4 s | no cache |
 
-On macOS, minimenta reads each directory with one `getattrlistbulk(2)` call, which returns the names, types and sizes of all entries at once. ncdu calls `fstatat` for every file.
+How the numbers were measured:
 
-Endpoint security software (for example Microsoft Defender) inspects every directory open. On such machines, opening directories dominates the scan time for every tool, and the difference between minimenta and ncdu becomes smaller.
+- **Cold disk:** [`bench/cold.sh`](bench/cold.sh) drops the file cache before every run (`purge` on macOS, `drop_caches` on Linux) and runs both tools in alternating pairs. The CI benchmark jobs run it on GitHub runners. Only a few pairs fit in a CI run, so expect differences of about 10% between runs.
+- **Warm cache:** [`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items in 60 alternating pairs and reports the median time ratio.
+- **Repeat scans:** measured on a 10-core Mac with Microsoft Defender, on trees with 210,000 and 413,000 items. A repeat scan is not comparable with a first scan, so it has its own row.
+
+Why minimenta is faster:
+
+- **More threads.** A scan mostly waits on the disk and the kernel, so minimenta uses at least 16 threads. ncdu uses 1 thread unless you pass `-t`.
+- **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there, and with the same thread count they are about even.
+- **The cache on macOS.** minimenta keeps the last scan of each folder in `~/Library/Caches/minimenta` and asks FSEvents which directories changed since. It lists only those again. The browser says when it shows a cached scan, and `r` scans everything again.
+
+The goal of 2x over ncdu at its best is not reached on a cold disk.
+
+Endpoint security software (for example Microsoft Defender) inspects every directory open. On such machines, opening directories takes a large part of the scan time for every tool, and the difference between minimenta and ncdu becomes smaller.
 
 ## minimenta compared with other tools
 
@@ -113,7 +133,7 @@ Sources: the [ncdu manual](https://dev.yorhel.nl/ncdu/man) and [scanner source](
 
 </details>
 
-dua-cli and gdu have features that minimenta does not have, for example saved scans, search and more platforms. dust prints a tree and has no interactive mode. Choose minimenta when you want the ncdu look and keys together with a start prompt, range selection and the Trash.
+dua-cli and gdu have features that minimenta does not have, for example search and more platforms, and gdu can export a scan to a file. dust prints a tree and has no interactive mode. Choose minimenta when you want the ncdu look and keys together with a start prompt, range selection and the Trash.
 
 ## Development
 
