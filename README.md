@@ -94,7 +94,7 @@ You usually open a disk analyzer because the disk is full. Many folders have not
 | --- | --- | --- |
 | Cold disk, against ncdu with its defaults (1 thread) | 5.3x faster | 4.5x faster |
 | Cold disk, against ncdu at its fastest cold setting (`-t 64`) | 1.17x faster | ncdu about 5% faster (0.94x to 0.96x) |
-| Warm cache, against ncdu at its best (`-t <cores>`) | 1.5x to 1.8x faster | about even (1.05x) |
+| Warm cache, against ncdu at its best (`-t <cores>`) | 1.2x to 1.7x faster | ncdu about 7% faster (0.90x to 1.02x) |
 | Repeat scan of a folder with the cache (macOS only) | 0.05 s instead of 2 to 4 s | no cache |
 
 ncdu does not run on Windows, so there minimenta is compared with gdu 5.38.0 and dua-cli 2.45.1:
@@ -109,7 +109,7 @@ Without administrator rights, minimenta lists directories like the other tools, 
 How the numbers were measured:
 
 - **Cold disk:** [`bench/cold.sh`](bench/cold.sh) drops the file cache before every run (`purge` on macOS, `drop_caches` on Linux) and runs both tools in alternating pairs. The CI benchmark jobs run it on GitHub runners. Only a few pairs fit in a CI run, so expect differences of about 10% between runs.
-- **Warm cache:** [`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items in 60 alternating pairs and reports the median time ratio.
+- **Warm cache:** [`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items in 60 alternating pairs and reports the median time ratio. The ranges come from the last 6 CI runs. The macOS runner is noisy. On Linux, the mimalloc allocator makes this small scan about 7% slower, because the scan threads wait longer for work, but it makes a warm scan of `/usr` (737,881 items) 3% to 4% faster. Large trees are the common case, so minimenta keeps mimalloc.
 - **Windows:** [`bench/windows.sh`](bench/windows.sh) runs on a GitHub runner with 4 cores. Cold runs scan `C:\Program Files` (304,060 items) after [`bench/windows-purge.ps1`](bench/windows-purge.ps1) clears the file cache, 3 pairs per tool. Warm runs scan the synthetic tree and `C:\Program Files`.
 - **Repeat scans:** measured on a 10-core Mac with Microsoft Defender, on trees with 210,000 and 413,000 items. A repeat scan is not comparable with a first scan, so it has its own row.
 
