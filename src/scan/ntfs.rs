@@ -407,7 +407,6 @@ impl Part {
 }
 
 /// Everything the tree needs from the MFT, collected record by record.
-#[derive(Default)]
 pub struct Table {
     recs: Vec<Rec>,
     links: Vec<Link>,
@@ -415,9 +414,12 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn with_capacity(records: usize) -> Self {
+    /// A table for `records` records. Updates and links for a record past
+    /// the end come from a damaged record and are left out.
+    pub fn new(records: u32) -> Self {
+        let records = records as usize;
         Table {
-            recs: Vec::with_capacity(records),
+            recs: vec![Rec::default(); records],
             links: Vec::with_capacity(records),
             names: Vec::with_capacity(records * 32),
         }
@@ -427,16 +429,22 @@ impl Table {
     pub fn add(&mut self, index: u32, record: &Record) {
         let mut part = Part::default();
         part.add(index, record);
-        self.merge(part);
+        assert!(self.merge(part));
     }
 
-    pub fn merge(&mut self, part: Part) {
+    /// Adds the next part. Returns false when the names no longer fit the
+    /// 32-bit offsets of the links.
+    pub fn merge(&mut self, part: Part) -> bool {
+        let Ok(offset) = u32::try_from(self.names.len()) else {
+            return false;
+        };
+        if u32::try_from(self.names.len() + part.names.len()).is_err() {
+            return false;
+        }
         for update in part.updates {
-            let target = update.target as usize;
-            if self.recs.len() <= target {
-                self.recs.resize(target + 1, Rec::default());
-            }
-            let rec = &mut self.recs[target];
+            let Some(rec) = self.recs.get_mut(update.target as usize) else {
+                continue;
+            };
             if let Some((seq, flags)) = update.base {
                 (rec.seq, rec.flags) = (seq, flags);
             }
@@ -444,21 +452,26 @@ impl Table {
                 (rec.disk, rec.apparent) = (data.allocated, data.apparent);
             }
         }
-        let offset = self.names.len() as u32;
         self.names.extend_from_slice(&part.names);
         for mut link in part.links {
+            let Some(rec) = self.recs.get_mut(link.record as usize) else {
+                continue;
+            };
+            rec.names = rec.names.saturating_add(1);
             link.name_start += offset;
-            let target = link.record as usize;
-            if self.recs.len() <= target {
-                self.recs.resize(target + 1, Rec::default());
-            }
-            self.recs[target].names += 1;
             self.links.push(link);
         }
+        true
     }
 
-    /// Builds the tree below the directory record `root`.
-    pub fn build(&self, root: u32, progress: &Progress) -> Dir {
+    /// Builds the tree below the directory record `root`. Returns `None`
+    /// when that record is not an in-use directory with sequence number
+    /// `seq`, for example when it was torn or reused while it was read.
+    pub fn build(&self, root: u32, seq: u16, progress: &Progress) -> Option<Dir> {
+        let rec = self.recs.get(root as usize)?;
+        if rec.flags & (IN_USE | DIRECTORY) != IN_USE | DIRECTORY || rec.seq != seq {
+            return None;
+        }
         // Children grouped by parent (compressed sparse rows): one counting
         // pass, one prefix sum, one fill.
         let n = self.recs.len();
@@ -483,9 +496,10 @@ impl Table {
             order[fill[l.parent as usize] as usize] = i as u32;
             fill[l.parent as usize] += 1;
         }
-        let mut counted = vec![false; n];
+        let mut seen = vec![false; n];
+        seen[root as usize] = true;
         let mut scratch = Vec::new();
-        self.walk(root, &start, &order, &mut counted, &mut scratch, progress)
+        Some(self.walk(root, &start, &order, &mut seen, &mut scratch, progress))
     }
 
     fn walk(
@@ -493,7 +507,7 @@ impl Table {
         dir_rec: u32,
         start: &[u32],
         order: &[u32],
-        counted: &mut [bool],
+        seen: &mut [bool],
         scratch: &mut Vec<u8>,
         progress: &Progress,
     ) -> Dir {
@@ -518,10 +532,13 @@ impl Table {
                 if rec.flags & REPARSE != 0 {
                     // Junctions and directory symlinks are never followed.
                     dir.push(name, Kind::Symlink, 0, 0, 0);
-                } else {
+                } else if !std::mem::replace(&mut seen[link.record as usize], true) {
+                    // NTFS gives a directory one parent. A second link comes
+                    // from a damaged table: never walk a directory twice, so
+                    // a loop cannot recurse forever.
                     let index = dir.entries.len();
                     dir.push(name, Kind::Dir, 0, 0, 0);
-                    let sub = self.walk(link.record, start, order, counted, scratch, progress);
+                    let sub = self.walk(link.record, start, order, seen, scratch, progress);
                     dir.attach(index, sub, 0);
                 }
                 continue;
@@ -529,7 +546,7 @@ impl Table {
             let mut flags = 0;
             if rec.names > 1 {
                 flags |= flag::MULTI_LINK;
-                if std::mem::replace(&mut counted[link.record as usize], true) {
+                if std::mem::replace(&mut seen[link.record as usize], true) {
                     flags |= flag::HARDLINK;
                 }
             }
@@ -772,7 +789,7 @@ mod tests {
     /// two hard links, a junction, and a file with a stale parent reference.
     #[test]
     fn the_table_builds_the_tree_below_a_root() {
-        let mut table = Table::default();
+        let mut table = Table::new(64);
         let mut add = |index: u32, raw: &mut Vec<u8>| {
             assert!(apply_fixups(raw));
             table.add(index, &parse_record(raw).unwrap());
@@ -851,7 +868,7 @@ mod tests {
         add(36, &mut record(1, 0, 0, &[file_name(30, 2, "deleted", 1)]));
 
         let progress = Progress::default();
-        let root = table.build(5, &progress);
+        let root = table.build(5, 5, &progress).unwrap();
         let names: Vec<&[u8]> = root.entries.iter().map(|e| root.name(e)).collect();
         assert_eq!(
             names,
@@ -894,5 +911,95 @@ mod tests {
             "the second hard link is not counted"
         );
         assert_eq!(progress.items.load(Relaxed), 5);
+    }
+
+    fn paths(dir: &Dir, prefix: &str, out: &mut Vec<String>) {
+        for e in &dir.entries {
+            let path = format!("{prefix}{}", String::from_utf8_lossy(dir.name(e)));
+            if let Some(sub) = &e.dir {
+                paths(sub, &format!("{path}/"), out);
+            }
+            out.push(path);
+        }
+    }
+
+    /// A damaged table: a directory that names itself as its parent, two
+    /// directories that name each other, and an extension record whose base
+    /// is far past the end of the table.
+    #[test]
+    fn a_damaged_table_cannot_loop_or_grow() {
+        let mut table = Table::new(64);
+        let mut add = |index: u32, raw: &mut Vec<u8>| {
+            assert!(apply_fixups(raw));
+            table.add(index, &parse_record(raw).unwrap());
+        };
+        let dir = RECORD_IN_USE | RECORD_DIRECTORY;
+        add(5, &mut record(5, dir, 0, &[file_name(5, 5, ".", 1)]));
+        add(
+            40,
+            &mut record(
+                1,
+                dir,
+                0,
+                &[file_name(5, 5, "a", 1), file_name(41, 1, "again", 0)],
+            ),
+        );
+        add(41, &mut record(1, dir, 0, &[file_name(40, 1, "b", 1)]));
+        add(
+            42,
+            &mut record(
+                1,
+                dir,
+                0,
+                &[file_name(5, 5, "self", 1), file_name(42, 1, "me", 0)],
+            ),
+        );
+        add(
+            43,
+            &mut record(1, RECORD_IN_USE, 1_000_000, &[file_name(5, 5, "far", 1)]),
+        );
+        assert_eq!(
+            table.recs.len(),
+            64,
+            "a damaged base does not grow the table"
+        );
+
+        let root = table.build(5, 5, &Progress::default()).unwrap();
+        let mut seen = Vec::new();
+        paths(&root, "", &mut seen);
+        seen.sort();
+        assert_eq!(seen, ["a", "a/b", "self"]);
+    }
+
+    #[test]
+    fn the_tree_needs_an_in_use_root_with_the_right_sequence() {
+        let mut table = Table::new(64);
+        let mut add = |index: u32, raw: &mut Vec<u8>| {
+            assert!(apply_fixups(raw));
+            table.add(index, &parse_record(raw).unwrap());
+        };
+        let dir = RECORD_IN_USE | RECORD_DIRECTORY;
+        add(5, &mut record(5, dir, 0, &[file_name(5, 5, ".", 1)]));
+        add(
+            30,
+            &mut record(3, RECORD_IN_USE, 0, &[file_name(5, 5, "file", 1)]),
+        );
+        add(
+            31,
+            &mut record(2, RECORD_DIRECTORY, 0, &[file_name(5, 5, "gone", 1)]),
+        );
+
+        let progress = Progress::default();
+        assert!(table.build(5, 5, &progress).is_some());
+        assert!(
+            table.build(5, 4, &progress).is_none(),
+            "the record was reused"
+        );
+        assert!(table.build(30, 3, &progress).is_none(), "a file is no root");
+        assert!(
+            table.build(31, 2, &progress).is_none(),
+            "the record is not in use"
+        );
+        assert!(table.build(64, 0, &progress).is_none(), "past the end");
     }
 }

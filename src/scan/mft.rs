@@ -55,7 +55,7 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
     let Some(volume) = open_volume(root) else {
         return Ok(None);
     };
-    let root_record = record_number(root)?;
+    let (root_record, root_seq) = record_number(root)?;
 
     // The boot sector is 512 bytes, but reads must cover whole sectors.
     let mut first = pages(4096);
@@ -85,7 +85,7 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
         return Ok(None);
     };
     let total = size / boot.record_size as u64;
-    let Ok(capacity) = usize::try_from(total) else {
+    let Ok(records) = u32::try_from(total) else {
         return Ok(None);
     };
 
@@ -143,11 +143,13 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
             )
             .collect()
     });
-    let mut table = Table::with_capacity(capacity);
+    let mut table = Table::new(records);
     for part in parts {
-        table.merge(part?);
+        if !table.merge(part?) {
+            return Ok(None);
+        }
     }
-    Ok(Some(table.build(root_record, progress)))
+    Ok(table.build(root_record, root_seq, progress))
 }
 
 fn wide(path: &Path) -> Vec<u16> {
@@ -222,8 +224,9 @@ fn open_volume(root: &Path) -> Option<File> {
     Some(unsafe { File::from_raw_handle(handle) })
 }
 
-/// The MFT record number of a directory: the low 48 bits of its file index.
-fn record_number(path: &Path) -> io::Result<u32> {
+/// The MFT record number of a directory, the low 48 bits of its file index,
+/// and the sequence number of the record, the high 16 bits.
+fn record_number(path: &Path) -> io::Result<(u32, u16)> {
     let path = wide(path);
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     // SAFETY: `path` is NUL-terminated. Backup semantics open a directory.
@@ -248,9 +251,9 @@ fn record_number(path: &Path) -> io::Result<u32> {
     if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), &mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let index =
-        (u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow)) & 0xFFFF_FFFF_FFFF;
-    u32::try_from(index).map_err(io::Error::other)
+    let index = u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow);
+    let record = u32::try_from(index & 0xFFFF_FFFF_FFFF).map_err(io::Error::other)?;
+    Ok((record, (index >> 48) as u16))
 }
 
 fn read_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
