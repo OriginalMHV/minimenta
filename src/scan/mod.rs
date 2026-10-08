@@ -108,9 +108,16 @@ struct Ctx<'a> {
     root_dev: u64,
     progress: &'a Progress,
     hardlinks: Mutex<HashSet<(u64, u64)>>,
+    /// Stops the scan without counting as a cancel, for example when another
+    /// method finished first.
+    stop: &'a AtomicBool,
 }
 
 impl Ctx<'_> {
+    fn stopped(&self) -> bool {
+        self.progress.cancel.load(Relaxed) || self.stop.load(Relaxed)
+    }
+
     #[cfg_attr(windows, allow(dead_code))]
     fn first_link(&self, dev: u64, ino: u64) -> bool {
         self.hardlinks.lock().unwrap().insert((dev, ino))
@@ -131,26 +138,58 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     }
     #[cfg(windows)]
     if opts.mft {
-        match mft::scan(path, opts.threads, progress) {
-            Ok(Some(mut dir)) => {
-                progress.mft.store(true, Relaxed);
-                dir.sort(Sort::default());
-                return Ok(dir);
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
-            // Anything else, for example a read error, falls back to listing
-            // the directories.
-            _ => {
-                progress.items.store(0, Relaxed);
-                progress.disk.store(0, Relaxed);
-            }
-        }
+        return race(path, opts, progress, &meta);
     }
+    list(path, opts, progress, &meta, &AtomicBool::new(false))
+}
+
+/// Starts the MFT reader and the directory listing at the same time and
+/// keeps the result that finishes first. The MFT reader must read the table
+/// of the whole volume (about 3 s for a 1.3 GB table), so a listing wins for
+/// small or warm folders, and the MFT wins on a cold disk, where a listing
+/// waits for thousands of small reads.
+#[cfg(windows)]
+fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
+    let stop_listing = AtomicBool::new(false);
+    let mft_progress = Progress::default();
+    std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let result = mft::scan(path, opts.threads, &mft_progress);
+            if matches!(result, Ok(Some(_))) {
+                stop_listing.store(true, Relaxed);
+            }
+            result
+        });
+        let listed = list(path, opts, progress, meta, &stop_listing);
+        if stop_listing.load(Relaxed)
+            && let Ok(Ok(Some(mut dir))) = reader.join()
+        {
+            progress.mft.store(true, Relaxed);
+            progress
+                .items
+                .store(mft_progress.items.load(Relaxed), Relaxed);
+            dir.sort(Sort::default());
+            return Ok(dir);
+        }
+        // The listing finished first, or the MFT reader could not run.
+        mft_progress.cancel.store(true, Relaxed);
+        listed
+    })
+}
+
+fn list(
+    path: &Path,
+    opts: &Options,
+    progress: &Progress,
+    meta: &fs::Metadata,
+    stop: &AtomicBool,
+) -> io::Result<Dir> {
     let ctx = Ctx {
         one_fs: opts.one_fs,
-        root_dev: dev_ino(&meta).0,
+        root_dev: dev_ino(meta).0,
         progress,
         hardlinks: Mutex::default(),
+        stop,
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
@@ -158,14 +197,14 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(&meta).1));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::os::unix::fs::MetadataExt;
         dir.own_disk = meta.blocks() * 512;
     }
-    if progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     match result {
@@ -223,6 +262,7 @@ pub fn update(
         root_dev: dev_ino(&meta).0,
         progress,
         hardlinks: Mutex::default(),
+        stop: &AtomicBool::new(false),
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
@@ -258,7 +298,7 @@ pub fn update(
     let mut listed = 0;
     pool.install(|| {
         for (components, recursive) in &targets {
-            if ctx.progress.cancel.load(Relaxed) {
+            if ctx.stopped() {
                 break;
             }
             let path = components
@@ -290,7 +330,7 @@ pub fn update(
         }
         Ok::<_, io::Error>(())
     })?;
-    if ctx.progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     fix_totals(dir);
@@ -427,7 +467,7 @@ fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Re
         id,
         ..Dir::default()
     };
-    if ctx.progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return (dir, Ok(()));
     }
     let mut subdirs = Vec::new();
