@@ -7,6 +7,10 @@ mod scan;
 mod tree;
 mod ui;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;

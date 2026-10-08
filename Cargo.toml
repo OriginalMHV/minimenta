@@ -11,6 +11,7 @@ categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 libc = "0.2.190"
+mimalloc = { version = "0.1.52", optional = true }
 ratatui = "0.30.2"
 rayon = "1.12.0"
 
@@ -28,3 +29,9 @@ tempfile = "3.27.0"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+[features]
+# mimalloc was 2% to 3% faster than the system allocator on a warm scan on
+# all three CI platforms. Build with --no-default-features to leave it out.
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
