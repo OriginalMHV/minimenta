@@ -160,9 +160,10 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
 /// Windows runner, a warm listing of `C:\Program Files` ran at about 460,000
 /// items/s and a cold one at about 18,000 items/s. Not starting the reader on
 /// a large cold folder costs 3x to 5x. Starting it costs about 20% on a warm
-/// disk, and up to 2x on a cold folder that the listing alone finishes within
+/// disk, and up to 3x on a cold folder that the listing alone finishes within
 /// a few seconds, because both then compete for the disk: a cold folder with
-/// 32,000 items took 1.9 s with the listing alone and 3.9 s in the race.
+/// 32,000 items took 1.2 s to 1.9 s with the listing alone and 3.6 s to 3.9 s
+/// in the race.
 #[cfg(windows)]
 const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(windows)]
