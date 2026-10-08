@@ -86,6 +86,9 @@ pub struct Dir {
     pub entries: Vec<Entry>,
     /// The order the entries are in. `None` means the order is stale.
     pub sort: Option<Sort>,
+    /// The blocks of the directory itself, in bytes. `du` counts them on
+    /// Linux. The macOS scanner leaves them at 0.
+    pub own_disk: u64,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -116,8 +119,13 @@ impl Dir {
         });
     }
 
+    /// The sizes of the entries plus the blocks of the directory itself.
     pub fn totals(&self) -> Totals {
-        self.entries.iter().fold(Totals::default(), |t, e| Totals {
+        let own = Totals {
+            disk: self.own_disk,
+            ..Totals::default()
+        };
+        self.entries.iter().fold(own, |t, e| Totals {
             disk: t.disk + e.counted_disk(),
             apparent: t.apparent + e.counted_apparent(),
             items: t.items + e.items,
@@ -130,12 +138,13 @@ impl Dir {
             .any(|e| e.has(flag::ERROR | flag::SUB_ERROR))
     }
 
-    /// Stores a scanned subdirectory in entry `i` and rolls its totals up.
+    /// Stores a scanned subdirectory in entry `i` and sets the entry's sizes
+    /// to the totals of `sub`, which include `sub.own_disk`.
     pub fn attach(&mut self, i: usize, sub: Dir, flags: u8) {
         let t = sub.totals();
         let e = &mut self.entries[i];
-        e.disk += t.disk;
-        e.apparent += t.apparent;
+        e.disk = t.disk;
+        e.apparent = t.apparent;
         e.items = 1 + t.items;
         e.flags |= flags;
         if sub.has_error() {
@@ -255,6 +264,38 @@ mod tests {
                 items: 2
             }
         );
+    }
+
+    #[test]
+    fn refreshing_an_unchanged_tree_keeps_directory_blocks() {
+        let mut leaf = Dir {
+            own_disk: 4096,
+            ..Dir::default()
+        };
+        leaf.push(b"f", Kind::File, 8192, 5000, 0);
+        let mut mid = Dir {
+            own_disk: 4096,
+            ..Dir::default()
+        };
+        mid.push(b"leaf", Kind::Dir, 0, 0, 0);
+        mid.attach(0, leaf, 0);
+        let mut root = Dir {
+            own_disk: 4096,
+            ..Dir::default()
+        };
+        root.push(b"mid", Kind::Dir, 0, 0, 0);
+        root.attach(0, mid, 0);
+        let mut tree = Tree {
+            path: PathBuf::from("/"),
+            dir: Box::new(root),
+        };
+        let before = tree.dir.totals();
+
+        tree.refresh_totals(&[0, 0]);
+
+        assert_eq!(before.disk, 3 * 4096 + 8192);
+        assert_eq!(tree.dir.totals(), before);
+        assert_eq!(tree.dir.entries[0].disk, 2 * 4096 + 8192);
     }
 
     #[test]

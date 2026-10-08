@@ -189,12 +189,23 @@ mod tests {
             0
         );
 
-        // du also counts the blocks of the root directory, which has no entry
-        // in the tree.
-        let root = fs::symlink_metadata(path).unwrap();
-        assert_eq!(totals.disk + root.blocks() * 512, du(path, false), "disk");
+        assert_eq!(totals.disk, du(path, false), "disk");
         assert_eq!(totals.apparent, du(path, true), "apparent");
         totals.items
+    }
+
+    /// The blocks of a new directory in `root`, or `None` on a file system
+    /// such as tmpfs that reports none, where the block tests prove nothing.
+    fn dir_blocks(root: &Path) -> Option<u64> {
+        let probe = root.join("probe");
+        fs::create_dir(&probe).unwrap();
+        let blocks = fs::symlink_metadata(&probe).unwrap().blocks() * 512;
+        fs::remove_dir(&probe).unwrap();
+        if blocks == 0 {
+            eprintln!("skipped: directories in {} use no blocks", root.display());
+            return None;
+        }
+        Some(blocks)
     }
 
     #[test]
@@ -218,12 +229,44 @@ mod tests {
     #[test]
     fn directories_count_their_own_blocks_but_no_apparent_size() {
         let tmp = tempfile::tempdir().unwrap();
+        let Some(blocks) = dir_blocks(tmp.path()) else {
+            return;
+        };
         fs::create_dir(tmp.path().join("empty")).unwrap();
 
         let dir = scan(tmp.path(), &opts(1), &Progress::default()).unwrap();
 
-        let meta = fs::symlink_metadata(tmp.path().join("empty")).unwrap();
-        assert_eq!(dir.entries[0].disk, meta.blocks() * 512);
+        let meta = fs::symlink_metadata(tmp.path()).unwrap();
+        assert_eq!(dir.own_disk, meta.blocks() * 512);
+        assert_eq!(dir.entries[0].disk, blocks);
         assert_eq!(dir.entries[0].apparent, 0);
+        assert_eq!(dir.totals().disk, dir.own_disk + blocks);
+    }
+
+    /// The browser rescans a directory after a delete and attaches the result.
+    #[test]
+    fn rescanning_a_subdirectory_keeps_its_own_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        if dir_blocks(tmp.path()).is_none() {
+            return;
+        }
+        fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
+        File::create(tmp.path().join("a/b/c/deep.bin"))
+            .unwrap()
+            .write_all(&[2; 70_000])
+            .unwrap();
+        let mut dir = scan(tmp.path(), &opts(4), &Progress::default()).unwrap();
+        let before = dir.totals();
+        let i = dir
+            .entries
+            .iter()
+            .position(|e| dir.name(e) == b"a")
+            .unwrap();
+
+        let sub = scan(&tmp.path().join("a"), &opts(4), &Progress::default()).unwrap();
+        (dir.entries[i].disk, dir.entries[i].apparent) = (0, 0);
+        dir.attach(i, sub, 0);
+
+        assert_eq!(dir.totals(), before);
     }
 }
