@@ -68,6 +68,8 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           NCDU="$RUNNER_TEMP/ncdu" bench/cold.sh /usr 3 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: One large directory
+        run: NCDU="$RUNNER_TEMP/ncdu" bench/flat_linux.sh "$RUNNER_TEMP/flat" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |
           sudo apt-get update -qq

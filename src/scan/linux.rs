@@ -3,6 +3,10 @@
 //! no bulk attribute call, so one stat per entry is the floor (see
 //! `bench/syscalls_linux.c`).
 //!
+//! A directory larger than one batch of records stats the later batches in
+//! parallel tasks, so a huge directory does not keep one thread busy while
+//! the others wait.
+//!
 //! Directories count their own blocks in disk usage but add nothing to the
 //! apparent size. This matches `du -s` and `du -s --apparent-size`.
 
@@ -10,6 +14,7 @@ use std::cell::RefCell;
 use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
+use std::sync::Mutex;
 
 use super::{Ctx, SubDir};
 use crate::tree::{Dir, Kind, flag};
@@ -48,42 +53,105 @@ pub(super) fn read_dir(
     }
     let fd = Fd(fd);
 
-    BUF.with_borrow_mut(|buf| {
-        loop {
-            let n = unsafe {
-                libc::syscall(
-                    libc::SYS_getdents64,
-                    fd.0,
-                    buf.as_mut_ptr(),
-                    buf.len() * size_of::<u64>(),
-                )
-            };
-            if n < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(err);
-            }
-            if n == 0 {
-                return Ok(());
-            }
-            let base = buf.as_ptr().cast::<u8>();
-            let mut off = 0;
-            while off < n as usize {
-                // SAFETY: the kernel wrote `n` bytes of whole records, each
-                // with its length and a NUL-terminated name.
-                unsafe {
-                    let p = base.add(off);
-                    off += p.add(RECLEN).cast::<u16>().read_unaligned() as usize;
-                    let name = CStr::from_ptr(p.add(NAME).cast());
-                    if !matches!(name.to_bytes(), b"." | b"..") {
-                        add_entry(ctx, fd.0, name, dir, subdirs);
-                    }
-                }
+    // Most directories fit in the first batch and need no task.
+    let second = BUF.with_borrow_mut(|buf| {
+        let first = getdents(&fd, buf)?;
+        if first.is_empty() {
+            return Ok(None);
+        }
+        stat_batch(ctx, &fd, first, dir, subdirs);
+        let second = getdents(&fd, buf)?;
+        Ok::<_, io::Error>((!second.is_empty()).then(|| second.to_vec()))
+    })?;
+    match second {
+        Some(second) => read_rest(ctx, &fd, second, dir, subdirs),
+        None => Ok(()),
+    }
+}
+
+/// Stats each batch after the first in its own task, so idle threads share
+/// the stats of a large directory. The parts keep the order of the batches.
+fn read_rest(
+    ctx: &Ctx,
+    fd: &Fd,
+    second: Vec<u8>,
+    dir: &mut Dir,
+    subdirs: &mut Vec<SubDir>,
+) -> io::Result<()> {
+    let parts = Mutex::new(Vec::new());
+    let result = rayon::scope(|s| {
+        let mut next = Some(second);
+        let mut i = 0;
+        while let Some(records) = next {
+            let parts = &parts;
+            s.spawn(move |_| {
+                let mut part = Dir::default();
+                let mut part_subdirs = Vec::new();
+                stat_batch(ctx, fd, &records, &mut part, &mut part_subdirs);
+                parts.lock().unwrap().push((i, part, part_subdirs));
+            });
+            i += 1;
+            next = BUF.with_borrow_mut(|buf| {
+                let records = getdents(fd, buf)?;
+                Ok::<_, io::Error>((!records.is_empty()).then(|| records.to_vec()))
+            })?;
+        }
+        Ok(())
+    });
+    let mut parts = parts.into_inner().unwrap();
+    parts.sort_unstable_by_key(|part| part.0);
+    for (_, part, part_subdirs) in parts {
+        let first = dir.entries.len();
+        let names = dir.names.len() as u32;
+        dir.names.extend_from_slice(&part.names);
+        dir.entries.extend(part.entries.into_iter().map(|mut e| {
+            e.name_start += names;
+            e
+        }));
+        subdirs.extend(part_subdirs.into_iter().map(|mut sub| {
+            sub.index += first;
+            sub
+        }));
+    }
+    result
+}
+
+/// Reads the next batch of records, or an empty slice at the end.
+fn getdents<'b>(fd: &Fd, buf: &'b mut [u64]) -> io::Result<&'b [u8]> {
+    loop {
+        let n = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                fd.0,
+                buf.as_mut_ptr(),
+                size_of_val(buf),
+            )
+        };
+        if n >= 0 {
+            // SAFETY: the kernel wrote `n` bytes into the buffer.
+            return Ok(unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), n as usize) });
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+fn stat_batch(ctx: &Ctx, fd: &Fd, records: &[u8], dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
+    let mut off = 0;
+    while off < records.len() {
+        // SAFETY: the kernel wrote whole records, each with its length and a
+        // NUL-terminated name.
+        unsafe {
+            let p = records.as_ptr().add(off);
+            off += p.add(RECLEN).cast::<u16>().read_unaligned() as usize;
+            let name = CStr::from_ptr(p.add(NAME).cast());
+            if !matches!(name.to_bytes(), b"." | b"..") {
+                add_entry(ctx, fd.0, name, dir, subdirs);
             }
         }
-    })
+    }
 }
 
 fn add_entry(ctx: &Ctx, fd: libc::c_int, name: &CStr, dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
@@ -135,6 +203,7 @@ fn add_entry(ctx: &Ctx, fd: libc::c_int, name: &CStr, dir: &mut Dir, subdirs: &m
 #[cfg(test)]
 mod tests {
     use crate::scan::{Options, Progress, scan};
+    use crate::tree::Kind;
     use std::fs::{self, File};
     use std::io::Write;
     use std::os::unix::fs::MetadataExt;
@@ -219,6 +288,38 @@ mod tests {
         build(tmp.path());
 
         assert_eq!(assert_matches_du(tmp.path()), 3000 + 9);
+    }
+
+    /// The batches after the first are statted in parallel tasks, so a
+    /// subdirectory in a later batch must still be scanned and attached.
+    #[test]
+    fn large_directories_keep_every_entry_and_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("big");
+        fs::create_dir(&big).unwrap();
+        for i in 0..6000 {
+            let path = big.join(format!("{i:0>40}"));
+            if i % 1000 == 999 {
+                fs::create_dir(&path).unwrap();
+                File::create(path.join("inner.bin"))
+                    .unwrap()
+                    .write_all(&[3; 100])
+                    .unwrap();
+            } else {
+                File::create(path).unwrap().write_all(&[1; 5]).unwrap();
+            }
+        }
+
+        assert_eq!(assert_matches_du(&big), 6006);
+
+        let dir = scan(&big, &opts(4), &Progress::default()).unwrap();
+        let mut names: Vec<&[u8]> = dir.entries.iter().map(|e| dir.name(e)).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 6000);
+        let subdirs: Vec<_> = dir.entries.iter().filter(|e| e.kind == Kind::Dir).collect();
+        assert_eq!(subdirs.len(), 6);
+        assert!(subdirs.iter().all(|e| e.items == 2 && e.apparent == 100));
     }
 
     /// Run with `MINIMENTA_DU_TREE=/usr cargo test -- --ignored`. The tree must
