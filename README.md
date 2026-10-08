@@ -36,7 +36,7 @@ minimenta runs on macOS, Linux and Windows. Each method installs two commands: `
 brew install OriginalMHV/tap/minimenta
 
 # crates.io
-cargo install minimenta
+cargo install --locked minimenta
 
 # Shell installer (macOS and Linux)
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.sh | sh
@@ -47,7 +47,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/OriginalMHV/minime
 
 The installer scripts put both commands in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) and add that folder to your `PATH`. You can also download an archive for your system from the [releases page](https://github.com/OriginalMHV/minimenta/releases). Each archive holds both commands.
 
-`cargo install` needs Rust 1.88 or newer and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`. To install the latest commit instead of a release, run `cargo install --git https://github.com/OriginalMHV/minimenta`.
+`cargo install` needs Rust 1.88 or newer and a C compiler (for the mimalloc allocator). The option `--locked` builds with the dependency versions that the release was tested with. Without it, cargo ignores `Cargo.lock` and can pick newer versions. To build without mimalloc, add `--no-default-features`. To install the latest commit instead of a release, run `cargo install --locked --git https://github.com/OriginalMHV/minimenta`.
 
 ## Usage
 
@@ -169,7 +169,7 @@ dua-cli and gdu have features that minimenta does not have, for example search a
 
 ## Development
 
-Before you open a pull request, run the same checks as CI:
+Before you open a pull request, run the three checks that CI runs on macOS, Linux and Windows:
 
 ```sh
 cargo fmt --check
@@ -177,8 +177,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+[CONTRIBUTING.md](CONTRIBUTING.md) lists two more checks, the commit convention and the rules for speed claims. All contributors must follow the [Code of Conduct](CODE_OF_CONDUCT.md). The [changelog](CHANGELOG.md) lists the changes of each release.
+
+To report a security problem, use the private form that [SECURITY.md](SECURITY.md) describes. Do not open a public issue.
+
 `docs/demo/render.sh` records the demo GIF from [`docs/demo/demo.tape`](docs/demo/demo.tape).
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+
+Unless you state otherwise, any contribution that you intentionally submit for inclusion in minimenta, as defined in the Apache-2.0 license, is dual licensed as above, without any additional terms or conditions.
