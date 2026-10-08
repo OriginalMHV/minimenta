@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::progress::{self, Outcome};
-use super::view;
+use super::{trash, view};
 use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
 use crate::tree::{Dir, Sort, SortKey, Tree, flag};
@@ -327,7 +327,7 @@ impl Browser {
         let result = if permanent {
             remove_all(&paths)
         } else {
-            move_to_trash(&paths)
+            trash::move_to_trash(&paths)
         };
 
         // Reconcile with the disk: drop what is gone, rescan what is still there.
@@ -446,27 +446,4 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
         }
     }
     first_error.map_or(Ok(()), Err)
-}
-
-/// Uses Finder first, so "Put Back" works. Falls back to the file manager API
-/// when Finder cannot be controlled, for example without Automation permission.
-#[cfg(target_os = "macos")]
-fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
-    use trash::macos::{DeleteMethod, TrashContextExtMacos};
-    let mut ctx = trash::TrashContext::default();
-    ctx.set_delete_method(DeleteMethod::Finder);
-    if ctx.delete_all(paths).is_ok() {
-        return Ok(());
-    }
-    let remaining: Vec<&PathBuf> = paths
-        .iter()
-        .filter(|p| p.symlink_metadata().is_ok())
-        .collect();
-    ctx.set_delete_method(DeleteMethod::NsFileManager);
-    ctx.delete_all(remaining).map_err(|e| e.to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
-    trash::delete_all(paths).map_err(|e| e.to_string())
 }

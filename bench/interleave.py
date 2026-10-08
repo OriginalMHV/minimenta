@@ -36,17 +36,19 @@ def main():
     for _ in range(0 if PREPARE else 3):
         run(a)
         run(b)
-    times_a, times_b, ratios = [], [], []
+    times_a, times_b, ratios, diffs = [], [], [], []
     for i in range(pairs):
         # Swap the order every pair so neither command always runs first.
         ta, tb = (run(a), run(b)) if i % 2 == 0 else tuple(reversed((run(b), run(a))))
         times_a.append(ta)
         times_b.append(tb)
         ratios.append(tb / ta)
+        diffs.append(tb - ta)
     ratios.sort()
     q1, q3 = ratios[len(ratios) // 4], ratios[3 * len(ratios) // 4]
     print(f"A median {statistics.median(times_a) * 1000:.1f} ms   B median {statistics.median(times_b) * 1000:.1f} ms")
     print(f"B/A median ratio {statistics.median(ratios):.2f}x  (middle half {q1:.2f}x to {q3:.2f}x, {pairs} pairs)")
+    print(f"B-A median difference {statistics.median(diffs) * 1000:+.2f} ms")
 
 
 main()

@@ -1,6 +1,7 @@
 mod browser;
 mod progress;
 mod prompt;
+mod trash;
 mod view;
 
 use std::io;
