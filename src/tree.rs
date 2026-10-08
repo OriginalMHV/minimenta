@@ -1,6 +1,14 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+/// A stored name as an `OsStr`. Names are stored as the platform's encoded
+/// bytes (`OsStr::as_encoded_bytes`), so they turn back into paths unchanged.
+pub fn os_name(bytes: &[u8]) -> &std::ffi::OsStr {
+    // SAFETY: every name comes from `as_encoded_bytes` on this platform, or
+    // from a Unix scanner, where any bytes are a valid `OsStr`.
+    unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes) }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     File,

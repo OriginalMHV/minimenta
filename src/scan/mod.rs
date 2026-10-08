@@ -1,9 +1,6 @@
 use std::collections::HashSet;
-use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -24,16 +21,57 @@ mod linux;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 use linux as platform;
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(target_os = "linux", target_pointer_width = "64")
-)))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_pointer_width = "64")
+    ))
+))]
 mod generic;
-#[cfg(not(any(
-    target_os = "macos",
-    all(target_os = "linux", target_pointer_width = "64")
-)))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_pointer_width = "64")
+    ))
+))]
 use generic as platform;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as platform;
+
+/// The path type the platform scanner opens: a C string on Unix, where the
+/// scanners call libc directly, and a `PathBuf` on Windows.
+#[cfg(unix)]
+pub(crate) type NativePath = std::ffi::CString;
+#[cfg(windows)]
+pub(crate) type NativePath = std::path::PathBuf;
+
+#[cfg(unix)]
+fn native(path: &Path) -> io::Result<NativePath> {
+    Ok(std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?)
+}
+
+#[cfg(windows)]
+fn native(path: &Path) -> io::Result<NativePath> {
+    Ok(path.to_path_buf())
+}
+
+/// Device and inode of a directory, used for `-x` and as its identity.
+/// Windows scanners never follow reparse points, so they need neither.
+#[cfg(unix)]
+fn dev_ino(meta: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(windows)]
+fn dev_ino(_: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -51,6 +89,9 @@ pub struct Progress {
     pub cancel: AtomicBool,
 }
 
+// The Windows scanner never follows reparse points, so it needs no device
+// check for `-x`, and its listing has no link count for hard links.
+#[cfg_attr(windows, allow(dead_code))]
 struct Ctx<'a> {
     one_fs: bool,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -60,6 +101,7 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    #[cfg_attr(windows, allow(dead_code))]
     fn first_link(&self, dev: u64, ino: u64) -> bool {
         self.hardlinks.lock().unwrap().insert((dev, ino))
     }
@@ -79,7 +121,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     }
     let ctx = Ctx {
         one_fs: opts.one_fs,
-        root_dev: meta.dev(),
+        root_dev: dev_ino(&meta).0,
         progress,
         hardlinks: Mutex::default(),
     };
@@ -88,10 +130,12 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .stack_size(16 << 20)
         .build()
         .map_err(io::Error::other)?;
-    let root = CString::new(path.as_os_str().as_bytes())?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, meta.ino()));
+    let root = native(path)?;
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(&meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
-    if cfg!(not(target_os = "macos")) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::fs::MetadataExt;
         dir.own_disk = meta.blocks() * 512;
     }
     if progress.cancel.load(Relaxed) {
@@ -149,7 +193,7 @@ pub fn update(
     let meta = fs::metadata(root)?;
     let ctx = Ctx {
         one_fs: opts.one_fs,
-        root_dev: meta.dev(),
+        root_dev: dev_ino(&meta).0,
         progress,
         hardlinks: Mutex::default(),
     };
@@ -183,22 +227,16 @@ pub fn update(
             .any(|r| r.len() < path.len() && path.starts_with(r))
     });
 
-    let root_bytes = root.as_os_str().as_bytes();
+    let native_root = native(root)?;
     let mut listed = 0;
     pool.install(|| {
         for (components, recursive) in &targets {
             if ctx.progress.cancel.load(Relaxed) {
                 break;
             }
-            let mut path = root_bytes.to_vec();
-            for c in components {
-                if !path.ends_with(b"/") {
-                    path.push(b'/');
-                }
-                path.extend_from_slice(c);
-            }
-            // SAFETY: built from a valid path and file names, neither contains NUL.
-            let path = unsafe { CString::from_vec_unchecked(path) };
+            let path = components
+                .iter()
+                .fold(native_root.clone(), |path, c| child_path(&path, c));
             let Some((target, entry_flags)) = locate(dir, components) else {
                 continue;
             };
@@ -239,7 +277,7 @@ fn relative<'p>(root: &Path, path: &'p Path) -> Option<Vec<&'p [u8]>> {
     let rest = path.strip_prefix(root).ok()?;
     rest.components()
         .map(|c| match c {
-            Component::Normal(name) => Some(name.as_bytes()),
+            Component::Normal(name) => Some(name.as_encoded_bytes()),
             _ => None,
         })
         .collect()
@@ -273,7 +311,7 @@ fn locate<'d>(dir: &'d mut Dir, components: &[&[u8]]) -> Option<(&'d mut Dir, Op
 /// and the inode match and it was readable last time. Anything else, such as
 /// a directory replaced by another one with the same name, is scanned fully.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn relist(ctx: &Ctx, path: CString, mut old: Dir) -> (Dir, io::Result<()>) {
+fn relist(ctx: &Ctx, path: NativePath, mut old: Dir) -> (Dir, io::Result<()>) {
     let mut fresh = Dir {
         id: old.id,
         ..Dir::default()
@@ -311,12 +349,11 @@ fn relist(ctx: &Ctx, path: CString, mut old: Dir) -> (Dir, io::Result<()>) {
             None => new_subdirs.push(sub),
         }
     }
-    let parent = path.as_bytes();
     let scanned: Vec<_> = new_subdirs
         .par_iter()
         .map(|sub| {
             let name = fresh.name(&fresh.entries[sub.index]);
-            scan_dir(ctx, child_path(parent, name), sub.expected, sub.ino)
+            scan_dir(ctx, child_path(&path, name), sub.expected, sub.ino)
         })
         .collect();
     for (sub, (mut tree, result)) in new_subdirs.iter().zip(scanned) {
@@ -358,7 +395,7 @@ fn fix_totals(dir: &mut Dir) {
 
 /// `expected` is the entry count from the parent listing, or 0 when unknown.
 /// `id` is the inode of the directory, or 0 when unknown.
-fn scan_dir(ctx: &Ctx, path: CString, expected: u32, id: u64) -> (Dir, io::Result<()>) {
+fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Result<()>) {
     let mut dir = Dir {
         id,
         ..Dir::default()
@@ -377,12 +414,11 @@ fn scan_dir(ctx: &Ctx, path: CString, expected: u32, id: u64) -> (Dir, io::Resul
     ctx.progress.disk.fetch_add(dir.totals().disk, Relaxed);
 
     if !subdirs.is_empty() {
-        let parent = path.as_bytes();
         let scanned: Vec<_> = subdirs
             .par_iter()
             .map(|sub| {
                 let name = dir.name(&dir.entries[sub.index]);
-                scan_dir(ctx, child_path(parent, name), sub.expected, sub.ino)
+                scan_dir(ctx, child_path(&path, name), sub.expected, sub.ino)
             })
             .collect();
         for (sub, (mut tree, result)) in subdirs.iter().zip(scanned) {
@@ -398,7 +434,9 @@ fn scan_dir(ctx: &Ctx, path: CString, expected: u32, id: u64) -> (Dir, io::Resul
     (dir, result)
 }
 
-fn child_path(parent: &[u8], name: &[u8]) -> CString {
+#[cfg(unix)]
+fn child_path(parent: &NativePath, name: &[u8]) -> NativePath {
+    let parent = parent.as_bytes();
     let mut path = Vec::with_capacity(parent.len() + name.len() + 2);
     path.extend_from_slice(parent);
     if !parent.ends_with(b"/") {
@@ -406,15 +444,23 @@ fn child_path(parent: &[u8], name: &[u8]) -> CString {
     }
     path.extend_from_slice(name);
     // SAFETY: Unix file names and the root path cannot contain NUL bytes.
-    unsafe { CString::from_vec_unchecked(path) }
+    unsafe { std::ffi::CString::from_vec_unchecked(path) }
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(target_os = "linux", target_pointer_width = "64")
-)))]
+#[cfg(windows)]
+fn child_path(parent: &NativePath, name: &[u8]) -> NativePath {
+    parent.join(crate::tree::os_name(name))
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_pointer_width = "64")
+    ))
+))]
 fn as_path(path: &std::ffi::CStr) -> &Path {
-    Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()))
+    Path::new(crate::tree::os_name(path.to_bytes()))
 }
 
 #[cfg(test)]
@@ -469,6 +515,7 @@ mod tests {
         assert_eq!(progress.items.load(Relaxed), 6);
     }
 
+    #[cfg(unix)]
     #[test]
     fn counts_hard_links_once() {
         let tmp = tempfile::tempdir().unwrap();
@@ -482,6 +529,7 @@ mod tests {
         assert_eq!(flagged, 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn does_not_follow_symlinks() {
         let tmp = tempfile::tempdir().unwrap();
@@ -537,6 +585,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
     }
 
+    #[cfg(unix)]
     #[test]
     fn follows_a_symlink_given_as_the_root() {
         let tmp = tempfile::tempdir().unwrap();

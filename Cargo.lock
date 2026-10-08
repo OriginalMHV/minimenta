@@ -744,6 +744,7 @@ dependencies = [
  "rayon",
  "tempfile",
  "trash",
+ "windows-sys",
 ]
 
 [[package]]

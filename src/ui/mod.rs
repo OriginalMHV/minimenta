@@ -54,9 +54,15 @@ fn run_screens(
     }
 }
 
-/// Shows the home directory as `~` to keep paths short.
+/// Shows the home directory as `~` to keep paths short. On Windows it also
+/// hides the `\\?\` prefix that `canonicalize` adds for long paths.
 pub fn display_path(path: &Path) -> String {
-    match std::env::var_os("HOME").map(PathBuf::from) {
+    let shown = path
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|s| !s.starts_with("UNC\\"));
+    let path = shown.map_or(path, Path::new);
+    match std::env::home_dir() {
         Some(home) if path.starts_with(&home) && home != Path::new("/") => {
             let rest = path.strip_prefix(&home).unwrap_or(path);
             if rest.as_os_str().is_empty() {
