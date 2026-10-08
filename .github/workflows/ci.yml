@@ -38,8 +38,6 @@ jobs:
       - run: bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Cold-cache comparison
         run: bench/cold.sh /System/Library 3 | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Allocator comparison (experiment)
-        run: bench/allocator.sh /System/Library 20 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |
           cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
@@ -69,7 +67,6 @@ jobs:
         run: |
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           NCDU="$RUNNER_TEMP/ncdu" bench/cold.sh /usr 3 | tee -a "$GITHUB_STEP_SUMMARY"
-          bench/allocator.sh /usr 20 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |
@@ -102,5 +99,4 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           bench/windows.sh "$t/bench-tree" 30 | tee -a "$GITHUB_STEP_SUMMARY"
           COLD_PAIRS=3 bench/windows.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
-          PY=python bench/allocator.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
