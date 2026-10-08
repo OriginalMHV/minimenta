@@ -240,9 +240,13 @@ pub fn parse_record(record: &[u8]) -> Option<Record<'_>> {
             }
             (ATTR_DATA, true) if unnamed => {
                 // Resident data lives inside the record and takes no clusters.
+                // The Windows directory listing reports its size rounded up to
+                // 8 bytes, so do the same: the result must not depend on
+                // whether minimenta runs as an administrator.
+                let size = u64::from(u32_at(attr, 0x10)?);
                 parsed.data = Some(DataSize {
-                    apparent: u64::from(u32_at(attr, 0x10)?),
-                    allocated: 0,
+                    apparent: size,
+                    allocated: size.next_multiple_of(8),
                 });
             }
             (ATTR_DATA, false) if unnamed && u64_at(attr, 0x10)? == 0 => {
@@ -682,7 +686,7 @@ mod tests {
             parsed(&mut raw).data,
             Some(DataSize {
                 apparent: 5,
-                allocated: 0
+                allocated: 8
             })
         );
     }
@@ -813,10 +817,10 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("a.bin".into(), 0, 100, Kind::File, flag::MULTI_LINK),
+                ("a.bin".into(), 104, 100, Kind::File, flag::MULTI_LINK),
                 (
                     "b.bin".into(),
-                    0,
+                    104,
                     100,
                     Kind::File,
                     flag::MULTI_LINK | flag::HARDLINK

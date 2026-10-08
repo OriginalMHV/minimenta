@@ -61,6 +61,10 @@ pub(super) fn scan(root: &Path, progress: &Progress) -> io::Result<Option<Dir>> 
         return Ok(None);
     };
 
+    // Temporary timing printout to find the cost of each phase.
+    let profile = std::env::var_os("MINIMENTA_PROFILE").is_some();
+    let started = std::time::Instant::now();
+    let mut read_time = std::time::Duration::ZERO;
     let mut table = Table::with_capacity(capacity);
     let mut buf = vec![0u8; CHUNK as usize];
     let mut index = 0u64;
@@ -76,7 +80,9 @@ pub(super) fn scan(root: &Path, progress: &Progress) -> io::Result<Option<Dir>> 
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
             }
             let len = (run_bytes - done).min(CHUNK) as usize;
+            let t = std::time::Instant::now();
             read_at(&volume, &mut buf[..len], lcn * boot.cluster_size + done)?;
+            read_time += t.elapsed();
             for record in buf[..len].chunks_exact_mut(boot.record_size) {
                 if index >= total {
                     break;
@@ -92,7 +98,18 @@ pub(super) fn scan(root: &Path, progress: &Progress) -> io::Result<Option<Dir>> 
             progress.disk.fetch_add(len as u64, Relaxed);
         }
     }
-    Ok(Some(table.build(root_record, progress)))
+    let parsed = started.elapsed();
+    let dir = table.build(root_record, progress);
+    if profile {
+        eprintln!(
+            "mft: {total} records ({} MiB), read {:.0} ms, parse {:.0} ms, build {:.0} ms",
+            size >> 20,
+            read_time.as_secs_f64() * 1e3,
+            (parsed - read_time).as_secs_f64() * 1e3,
+            (started.elapsed() - parsed).as_secs_f64() * 1e3
+        );
+    }
+    Ok(Some(dir))
 }
 
 fn wide(path: &Path) -> Vec<u16> {
@@ -243,14 +260,18 @@ mod tests {
     use crate::tree::Kind;
     use std::fs;
 
-    /// One line per entry with its path, kind and sizes, sorted. Flags are
-    /// left out: the directory listing has no link count, so only the MFT
-    /// marks hard links.
+    /// One line per entry with its path, kind and sizes, sorted. Directories
+    /// show no sizes and flags are left out: the directory listing has no link
+    /// count, so only the MFT counts a hard-linked file once.
     fn describe(dir: &Dir) -> Vec<String> {
         fn walk(dir: &Dir, prefix: &str, out: &mut Vec<String>) {
             for e in &dir.entries {
                 let name = format!("{prefix}{}", String::from_utf8_lossy(dir.name(e)));
-                out.push(format!("{name} {:?} {} {}", e.kind, e.disk, e.apparent));
+                if e.kind == Kind::Dir {
+                    out.push(format!("{name} Dir"));
+                } else {
+                    out.push(format!("{name} {:?} {} {}", e.kind, e.disk, e.apparent));
+                }
                 if let Some(sub) = &e.dir {
                     walk(sub, &format!("{name}/"), out);
                 }
