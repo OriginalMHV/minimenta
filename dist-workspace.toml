@@ -11,4 +11,4 @@ publish-jobs = ["homebrew", "./publish-crates"]
 # The crates.io job reads the repository and asks GitHub for an OIDC token.
 # It needs no package write access, which dist grants to publish jobs by default.
 github-custom-job-permissions = { "publish-crates" = { contents = "read", id-token = "write" } }
-pr-run-mode = "upload"
+pr-run-mode = "plan"
