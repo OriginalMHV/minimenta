@@ -17,7 +17,7 @@ minimenta is an interactive disk usage analyzer for the terminal, written in Rus
 
 - **A start prompt.** Run `minimenta` without a folder. The prompt shows the current folder. Enter scans it, and Tab completes folder names.
 - **Multi-select.** Space selects one item. Shift+Up/Down (or `K`/`J`) selects a range. Ctrl+A selects all items in the folder, and Esc clears the selection.
-- **The Trash first.** `d` moves the selection to the Trash. On macOS, minimenta asks Finder to do it, so "Put Back" works. If Finder cannot be controlled, minimenta uses the file manager API instead. `D` deletes permanently. Both keys ask for confirmation first.
+- **The Trash first.** `d` moves the selection to the Trash. On macOS, minimenta asks Finder to do it, so "Put Back" works. If Finder cannot be controlled, minimenta uses the file manager API instead. `D` deletes permanently. Both keys ask for confirmation first. `u` puts the last move to the Trash back, and each further `u` undoes the move before it, until you quit.
 - **The ncdu look and keys.** The same layout, size bars, file flags, sort keys and `-x` option. The keys that both tools have work the same, except `d`, which moves items to the Trash.
 - **A fast first scan.** At least 16 threads and, on macOS, bulk directory reads with `getattrlistbulk(2)`. On a cold disk, minimenta scans about 4x to 5x faster than ncdu with its defaults. See [Speed](#speed).
 - **Fast repeat scans on macOS.** minimenta keeps the last scan and lists again only the folders that FSEvents reports as changed.
@@ -62,6 +62,7 @@ Press Esc during a scan to cancel it, or `q` to quit.
 | Left, `h`, Backspace | Go to the parent folder |
 | `d` | Move the selection (or the item under the cursor) to the Trash |
 | `D` | Delete permanently |
+| `u` | Undo the last move to the Trash (press again for the move before it) |
 | `s` / `n` / `C` | Sort by size / name / items (press again to reverse) |
 | `a` | Show apparent size or disk usage |
 | `r` | Rescan the current folder |

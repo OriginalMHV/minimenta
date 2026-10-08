@@ -233,6 +233,7 @@ const HELP: &[(&str, &str)] = &[
     ("Left, h, Backspace", "Go to the parent directory"),
     ("d", "Move to the Trash (selection or cursor)"),
     ("D", "Delete permanently"),
+    ("u", "Undo the last move to the Trash"),
     ("s / n / C", "Sort by size / name / items (again: reverse)"),
     ("a", "Show apparent size or disk usage"),
     ("r", "Rescan this directory"),

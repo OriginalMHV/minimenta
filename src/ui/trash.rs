@@ -5,33 +5,155 @@
 //! Here Finder runs through `osascript`, and Foundation is loaded with
 //! `dlopen` only when Finder cannot be used.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+/// An item in the Trash and the place it came from, so `restore` can put it
+/// back.
+pub struct Trashed {
+    pub original: PathBuf,
+    #[cfg(target_os = "macos")]
+    location: PathBuf,
+    #[cfg(not(target_os = "macos"))]
+    item: trash::TrashItem,
+}
+
+/// Moves `paths` to the Trash. Returns the items that can be put back, which
+/// can be fewer than `paths` when a move failed, and the first error.
 #[cfg(not(target_os = "macos"))]
-pub fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
-    trash::delete_all(paths).map_err(|e| e.to_string())
+pub fn move_to_trash(paths: &[PathBuf]) -> (Vec<Trashed>, Result<(), String>) {
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    // The Trash keeps the resolved folder, for example the long form of an
+    // 8.3 name on Windows, so compare resolved folders and names.
+    let resolve = |folder: &Path| std::fs::canonicalize(folder).ok();
+    let wanted: Vec<_> = paths
+        .iter()
+        .map(|path| Some((path.parent().and_then(resolve)?, path.file_name()?)))
+        .collect();
+    let result = trash::delete_all(paths).map_err(|e| e.to_string());
+    // Find the items moved just now, the newest first for a path that was
+    // moved before too.
+    let mut listed = trash::os_limited::list().unwrap_or_default();
+    listed.retain(|item| item.time_deleted >= started - 1);
+    listed.sort_by_key(|item| std::cmp::Reverse(item.time_deleted));
+    let trashed = paths
+        .iter()
+        .zip(wanted)
+        .filter(|(path, _)| path.symlink_metadata().is_err())
+        .filter_map(|(path, wanted)| {
+            let (folder, name) = wanted?;
+            // Each entry belongs to one item, even when two names look alike.
+            let at = listed.iter().position(|item| {
+                same_name(item, name) && resolve(&item.original_parent).as_ref() == Some(&folder)
+            })?;
+            // Restore by the real name, not the display name.
+            let mut item = listed.remove(at);
+            item.name = name.to_os_string();
+            Some(Trashed {
+                original: path.clone(),
+                item,
+            })
+        })
+        .collect();
+    (trashed, result)
+}
+
+/// Whether the Trash entry `item` is the item called `name`. Windows lists
+/// the display name, which leaves out a known extension while Explorer hides
+/// extensions, but the entry's id (its `$R` file) keeps the extension.
+#[cfg(not(target_os = "macos"))]
+fn same_name(item: &trash::TrashItem, name: &std::ffi::OsStr) -> bool {
+    if item.name == name {
+        return true;
+    }
+    let name = Path::new(name);
+    cfg!(windows)
+        && name.file_stem() == Some(item.name.as_os_str())
+        && Path::new(&item.id).extension() == name.extension()
+}
+
+/// Puts items back where they came from. Returns how many came back.
+#[cfg(not(target_os = "macos"))]
+pub fn restore(items: &[Trashed]) -> Result<usize, String> {
+    trash::os_limited::restore_all(items.iter().map(|t| t.item.clone()))
+        .map_err(|e| e.to_string())?;
+    Ok(items.len())
 }
 
 /// Uses Finder first, so "Put Back" works. Falls back to the file manager API
 /// when Finder cannot be controlled, for example without Automation permission.
 #[cfg(target_os = "macos")]
-pub fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
+pub fn move_to_trash(paths: &[PathBuf]) -> (Vec<Trashed>, Result<(), String>) {
     // AppleScript text cannot hold a path that is not UTF-8.
     let utf8: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
-    if !utf8.is_empty() && finder::delete(&utf8) && utf8.len() == paths.len() {
-        return Ok(());
+    if !utf8.is_empty()
+        && utf8.len() == paths.len()
+        && let Some(locations) = finder::delete(&utf8)
+    {
+        // Finder returns the new places in the order of the request.
+        let trashed = if locations.len() == paths.len() {
+            paths
+                .iter()
+                .zip(locations)
+                .map(|(original, location)| Trashed {
+                    original: original.clone(),
+                    location,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        return (trashed, Ok(()));
     }
+    let mut trashed = Vec::new();
     let mut first_error = None;
     for path in paths.iter().filter(|p| p.symlink_metadata().is_ok()) {
-        if let Err(e) = file_manager::trash(path) {
-            first_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
+        match file_manager::trash(path) {
+            Ok(Some(location)) => trashed.push(Trashed {
+                original: path.clone(),
+                location,
+            }),
+            Ok(None) => {}
+            Err(e) => {
+                first_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
+            }
         }
     }
-    first_error.map_or(Ok(()), Err)
+    (trashed, first_error.map_or(Ok(()), Err))
+}
+
+/// Puts items back where they came from. Returns how many came back.
+#[cfg(target_os = "macos")]
+pub fn restore(items: &[Trashed]) -> Result<usize, String> {
+    let mut restored = 0;
+    let mut first_error = None;
+    for item in items {
+        let result = if item.original.symlink_metadata().is_ok() {
+            Err(format!("{} exists again", item.original.display()))
+        } else {
+            std::fs::rename(&item.location, &item.original)
+                .map_err(|e| format!("{}: {e}", item.original.display()))
+        };
+        match result {
+            Ok(()) => restored += 1,
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    first_error.map_or(Ok(restored), Err)
+}
+
+/// The folder an item came from, for refreshing the view after a restore.
+pub fn parent_of(item: &Trashed) -> Option<&Path> {
+    item.original.parent()
 }
 
 #[cfg(target_os = "macos")]
 mod finder {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
     /// The paths go to the script as arguments, so no path is ever quoted
@@ -49,14 +171,36 @@ mod finder {
         command
     }
 
-    pub fn delete(paths: &[&str]) -> bool {
-        let script = format!("{COLLECT}  tell application \"Finder\" to delete theFiles\nend run");
-        osascript(&script, paths)
+    /// Returns the new places of the items in the Trash, or `None` when
+    /// Finder could not be used.
+    pub fn delete(paths: &[&str]) -> Option<Vec<PathBuf>> {
+        // Finder returns references to the moved items. Their paths are
+        // joined with NUL, which no file name contains.
+        let script = format!(
+            "{COLLECT}  tell application \"Finder\" to set trashed to delete theFiles
+  if class of trashed is not list then set trashed to {{trashed}}
+  set out to \"\"
+  repeat with t in trashed
+    set out to out & POSIX path of (t as alias) & (character id 0)
+  end repeat
+  return out
+end run"
+        );
+        let output = osascript(&script, paths)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        Some(
+            text.split(|&b| b == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| PathBuf::from(std::ffi::OsStr::from_bytes(part)))
+                .collect(),
+        )
     }
 }
 
@@ -67,7 +211,7 @@ mod file_manager {
     use std::ffi::{CStr, CString, c_char, c_void};
     use std::mem::transmute;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::ptr::null_mut;
     use std::sync::OnceLock;
 
@@ -142,7 +286,9 @@ mod file_manager {
         }
     }
 
-    pub fn trash(path: &Path) -> Result<(), String> {
+    /// Returns the new place of the item in the Trash, when the file manager
+    /// reports it.
+    pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
         let rt = runtime()?;
         let path = CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
         // SAFETY: every message matches the signature of its Foundation
@@ -155,7 +301,7 @@ mod file_manager {
         }
     }
 
-    unsafe fn trash_in_pool(rt: &Runtime, path: &CStr) -> Result<(), String> {
+    unsafe fn trash_in_pool(rt: &Runtime, path: &CStr) -> Result<Option<PathBuf>, String> {
         // SAFETY: the caller guarantees that each cast matches the method.
         unsafe {
             let class = |name: &CStr| (rt.get_class)(name.as_ptr());
@@ -189,15 +335,29 @@ mod file_manager {
             }
             let url = send_id(class(c"NSURL"), sel(c"fileURLWithPath:"), string);
             let mut error: Id = null_mut();
+            let mut resulting: Id = null_mut();
             let trashed = send_trash(
                 manager,
                 sel(c"trashItemAtURL:resultingItemURL:error:"),
                 url,
-                null_mut(),
+                &mut resulting,
                 &mut error,
             );
             if is_yes(trashed) {
-                return Ok(());
+                if resulting.is_null() {
+                    return Ok(None);
+                }
+                // The URL is autoreleased, so read its path inside the pool.
+                let path = send(resulting, sel(c"path"));
+                let bytes = transmute::<
+                    unsafe extern "C" fn(),
+                    unsafe extern "C" fn(Id, Sel) -> *const c_char,
+                >(rt.msg_send)(path, sel(c"fileSystemRepresentation"));
+                if bytes.is_null() {
+                    return Ok(None);
+                }
+                let bytes = CStr::from_ptr(bytes).to_bytes();
+                return Ok(Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes))));
             }
             if error.is_null() {
                 return Err("the file manager refused".into());
@@ -289,7 +449,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("minimenta \"fallback\" ø.txt");
         std::fs::write(&path, b"x").unwrap();
-        file_manager::trash(&path).unwrap();
+        let location = file_manager::trash(&path)
+            .unwrap()
+            .expect("the new place in the Trash");
         assert!(path.symlink_metadata().is_err());
+        std::fs::rename(&location, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::fs;
+
+    fn round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Explorer hides known extensions, so on Windows both files are
+        // listed in the Recycle Bin as "minimenta undo test".
+        let file = tmp.path().join("minimenta undo test.txt");
+        let twin = tmp.path().join("minimenta undo test.log");
+        let folder = tmp.path().join("minimenta undo folder");
+        fs::write(&file, b"keep me").unwrap();
+        fs::write(&twin, b"and me").unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("inside.bin"), vec![7u8; 4096]).unwrap();
+
+        let paths = [file.clone(), twin.clone(), folder.clone()];
+        let (trashed, result) = move_to_trash(&paths);
+        result.unwrap();
+        assert_eq!(trashed.len(), 3, "every item can be put back");
+        assert!(paths.iter().all(|p| !p.exists()));
+
+        assert_eq!(restore(&trashed), Ok(3));
+        assert_eq!(fs::read(&file).unwrap(), b"keep me");
+        assert_eq!(fs::read(&twin).unwrap(), b"and me");
+        assert_eq!(fs::read(folder.join("inside.bin")).unwrap().len(), 4096);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn trashed_items_come_back() {
+        round_trip();
+    }
+
+    /// Asks Finder, which can wait for an Automation permission dialog that
+    /// nobody answers on a CI runner, so run it by hand.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "uses Finder and the Trash of the user who runs it"]
+    fn trashed_items_come_back_through_finder() {
+        round_trip();
     }
 }

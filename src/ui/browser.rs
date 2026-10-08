@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -40,6 +40,9 @@ pub struct Browser {
     /// Set when a rescan or delete corrected the tree, so it is saved on quit.
     session: Option<Header>,
     changed: bool,
+    /// Every move to the Trash in this session, the latest last, so `u` can
+    /// put them back one after the other.
+    undo: Vec<Vec<trash::Trashed>>,
 }
 
 enum Action {
@@ -50,6 +53,7 @@ enum Action {
         targets: Vec<usize>,
     },
     Rescan,
+    Undo,
 }
 
 pub fn run(
@@ -72,6 +76,7 @@ pub fn run(
         opts,
         session,
         changed: false,
+        undo: Vec::new(),
     };
     browser.apply_sort();
     let result = browser.event_loop(terminal);
@@ -103,6 +108,7 @@ impl Browser {
                     self.delete(terminal, permanent, &targets)?
                 }
                 Action::Rescan => self.rescan(terminal)?,
+                Action::Undo => self.undo(terminal)?,
             }
         }
     }
@@ -181,6 +187,7 @@ impl Browser {
             KeyCode::Char('d') => self.confirm(false),
             KeyCode::Char('D') => self.confirm(true),
             KeyCode::Char('r') => return Action::Rescan,
+            KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('?') => self.mode = Mode::Help,
             _ => {}
         }
@@ -322,11 +329,15 @@ impl Browser {
         self.message = Some(format!("{verb} {} …", count(paths.len())));
         terminal.draw(|frame| view::draw(frame, self))?;
 
-        let result = if permanent {
-            remove_all(&paths)
+        let (trashed, result) = if permanent {
+            (Vec::new(), remove_all(&paths))
         } else {
             trash::move_to_trash(&paths)
         };
+        let undoable = !trashed.is_empty();
+        if undoable {
+            self.undo.push(trashed);
+        }
 
         // Reconcile with the disk: drop what is gone, rescan what is still there.
         let mut pairs: Vec<(usize, PathBuf)> = targets.iter().copied().zip(paths).collect();
@@ -358,11 +369,63 @@ impl Browser {
         } else {
             "Moved to the Trash:"
         };
+        let hint = if undoable { " Press u to undo." } else { "" };
         self.message = Some(match result {
-            Ok(()) => format!("{done} {}", count(gone)),
-            Err(e) => format!("{done} {gone} of {}. Error: {e}", count(total)),
+            Ok(()) => format!("{done} {}.{hint}", count(gone)),
+            Err(e) => format!("{done} {gone} of {}.{hint} Error: {e}", count(total)),
         });
         Ok(())
+    }
+
+    /// Puts the latest batch from the Trash back, then shows the folder it
+    /// came back to, with the cursor on the first restored item.
+    fn undo(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let Some(batch) = self.undo.pop() else {
+            self.message = Some("Nothing to undo in this session".into());
+            return Ok(());
+        };
+        let first = batch
+            .first()
+            .and_then(|t| t.original.file_name())
+            .map(|n| n.as_encoded_bytes().to_vec());
+        let folder = batch
+            .first()
+            .and_then(trash::parent_of)
+            .map(Path::to_path_buf);
+        let result = trash::restore(&batch);
+        if let Some(stack) = folder.and_then(|f| self.stack_for(&f)) {
+            self.clear_selection();
+            self.stack = stack;
+            self.offset = 0;
+            self.rescan(terminal)?;
+            if let Some(i) = first.and_then(|name| self.dir().find(&name)) {
+                self.cursor = i;
+            }
+        }
+        let left = match self.undo.len() {
+            0 => String::new(),
+            n => format!(" Press u to undo {n} more."),
+        };
+        self.message = Some(match result {
+            Ok(n) => format!("Restored {}.{left}", count(n)),
+            Err(e) => format!("Could not restore everything: {e}.{left}"),
+        });
+        Ok(())
+    }
+
+    /// The stack of entry indices that leads to `folder`, if it is in the tree.
+    fn stack_for(&self, folder: &Path) -> Option<Vec<usize>> {
+        let mut stack = Vec::new();
+        let mut dir = &*self.tree.dir;
+        for component in folder.strip_prefix(&self.tree.path).ok()?.components() {
+            let Component::Normal(name) = component else {
+                return None;
+            };
+            let i = dir.find(name.as_encoded_bytes())?;
+            stack.push(i);
+            dir = dir.entries[i].dir.as_deref()?;
+        }
+        Some(stack)
     }
 
     fn rescan(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
