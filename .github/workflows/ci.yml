@@ -66,7 +66,10 @@ jobs:
       - name: Cold-cache comparison
         run: |
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          NCDU="$RUNNER_TEMP/ncdu" bench/cold.sh /usr 3 | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo apt-get update -qq && sudo apt-get install -y -qq liburing-dev
+          cc -O2 -o "$RUNNER_TEMP/syscalls_linux" bench/syscalls_linux.c -luring
+          ulimit -n "$(ulimit -Hn)"
+          for round in 1 2 3; do COLD=1 "$RUNNER_TEMP/syscalls_linux" /usr 64 | tee -a "$GITHUB_STEP_SUMMARY"; done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |

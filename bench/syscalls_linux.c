@@ -225,22 +225,28 @@ int main(int argc, char **argv) {
     }
 
     printf("%d directories\n", ndirs);
-    for (int t = 1;; t = threads) {
+    // COLD=1: one run per mode, with the page cache dropped before it, and
+    // only at the full thread count.
+    int cold = getenv("COLD") != NULL;
+    for (int t = cold ? threads : 1;; t = threads) {
         for (mode = 0; mode < MODES; mode++) {
 #ifndef HAVE_URING
             if (mode == URING_STATX) continue;
 #endif
+            if (cold && mode == URING_STATX) continue;
+            int runs = cold ? 1 : 7;
             double times[7];
-            for (int r = 0; r < 7; r++) {
+            for (int r = 0; r < runs; r++) {
                 pthread_t tid[64];
                 next = 0;
+                if (cold && system("sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null") != 0) return 1;
                 double s = now();
                 for (int k = 0; k < t; k++) pthread_create(&tid[k], NULL, worker, NULL);
                 for (int k = 0; k < t; k++) pthread_join(tid[k], NULL);
                 times[r] = now() - s;
             }
-            qsort(times, 7, sizeof(double), cmp_double);
-            double median = times[3];
+            qsort(times, runs, sizeof(double), cmp_double);
+            double median = times[runs / 2];
             printf("%2d thread(s)  %-48s %7.1f ms  %6.1f us/dir\n", t, names[mode], median * 1e3,
                    median / ndirs * 1e6);
         }
