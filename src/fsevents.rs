@@ -199,7 +199,7 @@ pub fn changes_since(
     if path.is_null() {
         return None;
     }
-    let paths = (api.array_create)(std::ptr::null(), &path, 1, api.array_callbacks);
+    let paths = (api.array_create)(std::ptr::null(), &raw const path, 1, api.array_callbacks);
     (api.release_cf)(path);
     let context = StreamContext {
         version: 0,
@@ -211,7 +211,7 @@ pub fn changes_since(
     let stream = (api.stream_create)(
         std::ptr::null(),
         on_events,
-        &context,
+        &raw const context,
         paths,
         since,
         0.0,

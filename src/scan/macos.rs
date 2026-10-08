@@ -66,7 +66,7 @@ pub(super) fn read_dir(
                     (&raw mut attrs).cast(),
                     buf.as_mut_ptr().cast(),
                     buf.len() * size_of::<u64>(),
-                    libc::FSOPT_PACK_INVAL_ATTRS as u64,
+                    u64::from(libc::FSOPT_PACK_INVAL_ATTRS),
                 )
             };
             if n < 0 {

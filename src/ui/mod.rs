@@ -42,7 +42,7 @@ fn run_screens(
                     path,
                     dir: Box::new(scan.dir),
                 };
-                return browser::run(terminal, tree, opts, scan.source, scan.session);
+                return browser::run(terminal, tree, opts, &scan.source, scan.session);
             }
             Outcome::Cancelled => prompt.set_path(&path),
             Outcome::Quit => return Ok(()),

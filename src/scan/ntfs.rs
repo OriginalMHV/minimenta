@@ -788,6 +788,10 @@ mod tests {
     /// Root (5) holds `docs` (30) and a metafile; `docs` holds a file with
     /// two hard links, a junction, and a file with a stale parent reference.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture with every kind of record"
+    )]
     fn the_table_builds_the_tree_below_a_root() {
         let mut table = Table::new(64);
         let mut add = |index: u32, raw: &mut Vec<u8>| {

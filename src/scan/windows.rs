@@ -104,6 +104,7 @@ pub(super) fn read_dir(
                 // offset 0.
                 unsafe {
                     let next = if full {
+                        #[allow(clippy::cast_ptr_alignment, reason = "the u64 buffer and NextEntryOffset keep records 8-byte aligned, and fields are read unaligned")]
                         let info = base.add(offset).cast::<FILE_FULL_DIR_INFO>();
                         let name = record_name(
                             ptr::addr_of!((*info).FileName).cast(),
@@ -120,6 +121,7 @@ pub(super) fn read_dir(
                         );
                         ptr::addr_of!((*info).NextEntryOffset).read_unaligned()
                     } else {
+                        #[allow(clippy::cast_ptr_alignment, reason = "the u64 buffer and NextEntryOffset keep records 8-byte aligned, and fields are read unaligned")]
                         let info = base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>();
                         let name = record_name(
                             ptr::addr_of!((*info).FileName).cast(),

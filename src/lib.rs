@@ -56,7 +56,7 @@ struct Args {
 /// warm, 1.28x faster cold on a 4-core Linux runner, and 1.05x faster than 10
 /// on a 10-core Mac.
 fn default_threads() -> usize {
-    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     cores.max(16)
 }
 
@@ -109,6 +109,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 /// Runs minimenta with the command-line arguments of the process.
+#[must_use]
 pub fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(args) => args,

@@ -248,7 +248,7 @@ fn record_number(path: &Path) -> io::Result<(u32, u16)> {
     let dir = unsafe { File::from_raw_handle(handle) };
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: `info` is a valid output buffer.
-    if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), &mut info) } == 0 {
+    if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), &raw mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let index = u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow);

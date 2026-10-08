@@ -1,7 +1,7 @@
 //! Lists a directory with raw `getdents64(2)` into a large buffer and calls
 //! `fstatat(2)` relative to the directory descriptor for each entry. Linux has
 //! no bulk attribute call, so one stat per entry is the floor (see
-//! bench/syscalls_linux.c).
+//! `bench/syscalls_linux.c`).
 //!
 //! Directories count their own blocks in disk usage but add nothing to the
 //! apparent size. This matches `du -s` and `du -s --apparent-size`.
@@ -175,7 +175,7 @@ mod tests {
             .unwrap();
         File::create(root.join("a/b/c/deep.bin"))
             .unwrap()
-            .write_all(&[2; 70_000])
+            .write_all(&vec![2; 70_000])
             .unwrap();
         fs::hard_link(root.join("a/b/c/deep.bin"), root.join("link.bin")).unwrap();
         std::os::unix::fs::symlink("a/one.bin", root.join("alias")).unwrap();
@@ -224,7 +224,7 @@ mod tests {
     /// Run with `MINIMENTA_DU_TREE=/usr cargo test -- --ignored`. The tree must
     /// be readable and must not change during the test.
     #[test]
-    #[ignore]
+    #[ignore = "needs a large real tree that does not change"]
     fn totals_match_du_on_a_real_tree() {
         let path = std::env::var_os("MINIMENTA_DU_TREE").unwrap_or("/usr".into());
         let items = assert_matches_du(Path::new(&path));
@@ -258,7 +258,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
         File::create(tmp.path().join("a/b/c/deep.bin"))
             .unwrap()
-            .write_all(&[2; 70_000])
+            .write_all(&vec![2; 70_000])
             .unwrap();
         let mut dir = scan(tmp.path(), &opts(4), &Progress::default()).unwrap();
         let before = dir.totals();

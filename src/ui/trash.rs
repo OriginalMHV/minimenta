@@ -340,8 +340,8 @@ mod file_manager {
                 manager,
                 sel(c"trashItemAtURL:resultingItemURL:error:"),
                 url,
-                &mut resulting,
-                &mut error,
+                &raw mut resulting,
+                &raw mut error,
             );
             if is_yes(trashed) {
                 if resulting.is_null() {
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn file_manager_reports_why_it_failed() {
         let error = file_manager::trash(Path::new("/nonexistent/minimenta")).unwrap_err();
-        assert!(!error.is_empty());
+        assert_ne!(error, "");
     }
 
     #[test]
