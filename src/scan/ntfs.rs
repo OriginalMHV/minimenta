@@ -393,7 +393,9 @@ impl Table {
                 continue;
             };
             let name_start = self.names.len() as u32;
-            push_wtf8(name.name, &mut self.names);
+            // Raw UTF-16 here, converted only for the entries the tree needs:
+            // a folder scan reads the whole volume's table.
+            self.names.extend_from_slice(name.name);
             self.links.push(Link {
                 parent,
                 parent_seq: name.parent_seq,
@@ -432,7 +434,8 @@ impl Table {
             fill[l.parent as usize] += 1;
         }
         let mut counted = vec![false; n];
-        self.walk(root, &start, &order, &mut counted, progress)
+        let mut scratch = Vec::new();
+        self.walk(root, &start, &order, &mut counted, &mut scratch, progress)
     }
 
     fn walk(
@@ -441,6 +444,7 @@ impl Table {
         start: &[u32],
         order: &[u32],
         counted: &mut [bool],
+        scratch: &mut Vec<u8>,
         progress: &Progress,
     ) -> Dir {
         let mut dir = Dir {
@@ -454,7 +458,12 @@ impl Table {
         for &link in &order[from..to] {
             let link = &self.links[link as usize];
             let rec = self.recs[link.record as usize];
-            let name = &self.names[link.name_start as usize..][..link.name_len as usize];
+            scratch.clear();
+            push_wtf8(
+                &self.names[link.name_start as usize..][..link.name_len as usize],
+                scratch,
+            );
+            let name = scratch.as_slice();
             if rec.flags & DIRECTORY != 0 {
                 if rec.flags & REPARSE != 0 {
                     // Junctions and directory symlinks are never followed.
@@ -462,7 +471,7 @@ impl Table {
                 } else {
                     let index = dir.entries.len();
                     dir.push(name, Kind::Dir, 0, 0, 0);
-                    let sub = self.walk(link.record, start, order, counted, progress);
+                    let sub = self.walk(link.record, start, order, counted, scratch, progress);
                     dir.attach(index, sub, 0);
                 }
                 continue;
