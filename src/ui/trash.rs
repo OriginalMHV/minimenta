@@ -43,12 +43,13 @@ pub fn move_to_trash(paths: &[PathBuf]) -> (Vec<Trashed>, Result<(), String>) {
         .filter(|(path, _)| path.symlink_metadata().is_err())
         .filter_map(|(path, wanted)| {
             let (folder, name) = wanted?;
-            let item = listed
-                .iter()
-                .find(|item| {
-                    item.name == name && resolve(&item.original_parent).as_ref() == Some(&folder)
-                })?
-                .clone();
+            // Each entry belongs to one item, even when two names look alike.
+            let at = listed.iter().position(|item| {
+                same_name(item, name) && resolve(&item.original_parent).as_ref() == Some(&folder)
+            })?;
+            // Restore by the real name, not the display name.
+            let mut item = listed.remove(at);
+            item.name = name.to_os_string();
             Some(Trashed {
                 original: path.clone(),
                 item,
@@ -56,6 +57,20 @@ pub fn move_to_trash(paths: &[PathBuf]) -> (Vec<Trashed>, Result<(), String>) {
         })
         .collect();
     (trashed, result)
+}
+
+/// Whether the Trash entry `item` is the item called `name`. Windows lists
+/// the display name, which leaves out a known extension while Explorer hides
+/// extensions, but the entry's id (its `$R` file) keeps the extension.
+#[cfg(not(target_os = "macos"))]
+fn same_name(item: &trash::TrashItem, name: &std::ffi::OsStr) -> bool {
+    if item.name == name {
+        return true;
+    }
+    let name = Path::new(name);
+    cfg!(windows)
+        && name.file_stem() == Some(item.name.as_os_str())
+        && Path::new(&item.id).extension() == name.extension()
 }
 
 /// Puts items back where they came from. Returns how many came back.
@@ -450,19 +465,25 @@ mod restore_tests {
 
     fn round_trip() {
         let tmp = tempfile::tempdir().unwrap();
+        // Explorer hides known extensions, so on Windows both files are
+        // listed in the Recycle Bin as "minimenta undo test".
         let file = tmp.path().join("minimenta undo test.txt");
+        let twin = tmp.path().join("minimenta undo test.log");
         let folder = tmp.path().join("minimenta undo folder");
         fs::write(&file, b"keep me").unwrap();
+        fs::write(&twin, b"and me").unwrap();
         fs::create_dir(&folder).unwrap();
         fs::write(folder.join("inside.bin"), vec![7u8; 4096]).unwrap();
 
-        let (trashed, result) = move_to_trash(&[file.clone(), folder.clone()]);
+        let paths = [file.clone(), twin.clone(), folder.clone()];
+        let (trashed, result) = move_to_trash(&paths);
         result.unwrap();
-        assert_eq!(trashed.len(), 2, "both items can be put back");
-        assert!(!file.exists() && !folder.exists());
+        assert_eq!(trashed.len(), 3, "every item can be put back");
+        assert!(paths.iter().all(|p| !p.exists()));
 
-        assert_eq!(restore(&trashed), Ok(2));
+        assert_eq!(restore(&trashed), Ok(3));
         assert_eq!(fs::read(&file).unwrap(), b"keep me");
+        assert_eq!(fs::read(&twin).unwrap(), b"and me");
         assert_eq!(fs::read(folder.join("inside.bin")).unwrap().len(), 4096);
     }
 
