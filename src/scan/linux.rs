@@ -15,12 +15,18 @@ use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use super::{Ctx, SubDir};
 use crate::tree::{Dir, Kind, flag};
 
 // u64 words keep the buffer 8-byte aligned for `linux_dirent64`.
 const BUF_WORDS: usize = 8 * 1024;
+
+// Batches waiting for a thread, per thread. Listing is much faster than the
+// stats, so without a limit a huge directory would queue a copy of its whole
+// listing. At the limit the listing thread stats the batch itself.
+const QUEUED_PER_THREAD: usize = 4;
 
 // Offsets in `struct linux_dirent64`: d_ino u64, d_off i64, d_reclen u16,
 // d_type u8, then the NUL-terminated name.
@@ -71,6 +77,7 @@ pub(super) fn read_dir(
 
 /// Stats each batch after the first in its own task, so idle threads share
 /// the stats of a large directory. The parts keep the order of the batches.
+/// A cancelled scan stops listing and skips the batches that still wait.
 fn read_rest(
     ctx: &Ctx,
     fd: &Fd,
@@ -79,17 +86,34 @@ fn read_rest(
     subdirs: &mut Vec<SubDir>,
 ) -> io::Result<()> {
     let parts = Mutex::new(Vec::new());
+    let queued = AtomicUsize::new(0);
+    let limit = QUEUED_PER_THREAD * rayon::current_num_threads();
+    let stat = |i: usize, records: &[u8]| {
+        if ctx.stopped() {
+            return;
+        }
+        let mut part = Dir::default();
+        let mut part_subdirs = Vec::new();
+        stat_batch(ctx, fd, records, &mut part, &mut part_subdirs);
+        parts.lock().unwrap().push((i, part, part_subdirs));
+    };
     let result = rayon::scope(|s| {
         let mut next = Some(second);
         let mut i = 0;
         while let Some(records) = next {
-            let parts = &parts;
-            s.spawn(move |_| {
-                let mut part = Dir::default();
-                let mut part_subdirs = Vec::new();
-                stat_batch(ctx, fd, &records, &mut part, &mut part_subdirs);
-                parts.lock().unwrap().push((i, part, part_subdirs));
-            });
+            if ctx.stopped() {
+                break;
+            }
+            if queued.load(Relaxed) < limit {
+                queued.fetch_add(1, Relaxed);
+                let (stat, queued) = (&stat, &queued);
+                s.spawn(move |_| {
+                    stat(i, &records);
+                    queued.fetch_sub(1, Relaxed);
+                });
+            } else {
+                stat(i, &records);
+            }
             i += 1;
             next = BUF.with_borrow_mut(|buf| {
                 let records = getdents(fd, buf)?;
@@ -203,12 +227,14 @@ fn add_entry(ctx: &Ctx, fd: libc::c_int, name: &CStr, dir: &mut Dir, subdirs: &m
 #[cfg(test)]
 mod tests {
     use crate::scan::{Options, Progress, scan};
-    use crate::tree::Kind;
+    use crate::tree::{Dir, Kind};
     use std::fs::{self, File};
     use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Mutex;
 
     fn du(path: &Path, apparent: bool) -> u64 {
         let mut cmd = Command::new("du");
@@ -312,14 +338,51 @@ mod tests {
 
         assert_eq!(assert_matches_du(&big), 6006);
 
-        let dir = scan(&big, &opts(4), &Progress::default()).unwrap();
-        let mut names: Vec<&[u8]> = dir.entries.iter().map(|e| dir.name(e)).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), 6000);
-        let subdirs: Vec<_> = dir.entries.iter().filter(|e| e.kind == Kind::Dir).collect();
-        assert_eq!(subdirs.len(), 6);
-        assert!(subdirs.iter().all(|e| e.items == 2 && e.apparent == 100));
+        // One thread fills the queue and stats the later batches itself.
+        for threads in [1, 4] {
+            let dir = scan(&big, &opts(threads), &Progress::default()).unwrap();
+            let mut names: Vec<&[u8]> = dir.entries.iter().map(|e| dir.name(e)).collect();
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), 6000, "{threads} threads");
+            let subdirs: Vec<_> = dir.entries.iter().filter(|e| e.kind == Kind::Dir).collect();
+            assert_eq!(subdirs.len(), 6, "{threads} threads");
+            assert!(subdirs.iter().all(|e| e.items == 2 && e.apparent == 100));
+        }
+    }
+
+    #[test]
+    fn a_cancelled_scan_stops_listing_a_large_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..6000 {
+            File::create(tmp.path().join(format!("{i:0>40}"))).unwrap();
+        }
+        let progress = Progress::default();
+        progress
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let ctx = super::Ctx {
+            one_fs: false,
+            root_dev: 0,
+            progress: &progress,
+            hardlinks: Mutex::default(),
+            stop: &std::sync::atomic::AtomicBool::new(false),
+        };
+        let path = std::ffi::CString::new(tmp.path().as_os_str().as_bytes()).unwrap();
+        let mut dir = Dir::default();
+        let mut subdirs = Vec::new();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        pool.install(|| super::read_dir(&ctx, &path, &mut dir, &mut subdirs, 0))
+            .unwrap();
+        // The first batch is listed before the check, the later ones are not.
+        assert!(
+            !dir.entries.is_empty() && dir.entries.len() < 6000,
+            "{} entries",
+            dir.entries.len()
+        );
     }
 
     /// Run with `MINIMENTA_DU_TREE=/usr cargo test -- --ignored`. The tree must
