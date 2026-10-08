@@ -819,6 +819,21 @@ mod tests {
     use super::*;
     use crate::tree::Sort;
 
+    #[test]
+    fn a_scan_that_an_elevated_run_could_speed_up_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = Options {
+            one_fs: false,
+            threads: 2,
+            cache: false,
+            mft: false,
+        };
+        let progress = Progress::default();
+        progress.elevate.store(true, Ordering::Relaxed);
+        let scan = scan(tmp.path(), &opts, &progress).unwrap();
+        assert!(matches!(scan.source, Source::ScannedNotElevated));
+    }
+
     fn sample() -> (Header, Dir) {
         let mut sub = Dir {
             id: 77,

@@ -514,3 +514,17 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
     }
     first_error.map_or(Ok(()), Err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_status_line_suggests_an_elevated_run_only_when_it_helps() {
+        assert_eq!(
+            describe(&Source::ScannedNotElevated).as_deref(),
+            Some(cache::ELEVATE_HINT)
+        );
+        assert_eq!(describe(&Source::Scanned), None);
+    }
+}
