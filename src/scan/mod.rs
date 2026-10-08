@@ -76,13 +76,18 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = CString::new(path.as_os_str().as_bytes())?;
-    let (dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
     if progress.cancel.load(Relaxed) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     match result {
         Err(e) if dir.entries.is_empty() => Err(e),
-        _ => Ok(dir),
+        _ => {
+            // Only the root is sorted here. The browser sorts each directory
+            // when it opens it, so most directories are never sorted at all.
+            dir.sort(Sort::default());
+            Ok(dir)
+        }
     }
 }
 
@@ -114,7 +119,6 @@ fn scan_dir(ctx: &Ctx, path: CString, expected: u32) -> (Dir, io::Result<()>) {
             dir.attach(i, sub, if result.is_err() { flag::ERROR } else { 0 });
         }
     }
-    dir.sort(Sort::default());
     (dir, result)
 }
 
