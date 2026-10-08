@@ -6,8 +6,9 @@ use std::ffi::CStr;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::slice;
+use std::sync::OnceLock;
 
 use super::{Ctx, SubDir};
 use crate::tree::{Dir, Kind, flag};
@@ -77,18 +78,47 @@ fn zero_is_empty(exact: bool, root_fs: bool, firmlinks: &[(PathBuf, PathBuf)]) -
 /// Whether `parent/name` is a firmlink. A firmlink reports the entry count of
 /// its empty placeholder, not of the folder it leads to.
 fn is_firmlink(parent: &[u8], name: &[u8]) -> bool {
-    is_firmlink_in(crate::cache::firmlinks(), parent, name)
+    crate::cache::firmlinks()
+        .iter()
+        .any(|(link, _)| joins(link, parent, name))
 }
 
-fn is_firmlink_in(table: &[(PathBuf, PathBuf)], parent: &[u8], name: &[u8]) -> bool {
+/// Whether `path` is `parent/name`.
+fn joins(path: &Path, parent: &[u8], name: &[u8]) -> bool {
+    let path = path.as_os_str().as_bytes();
     let parent = parent.strip_suffix(b"/").unwrap_or(parent);
-    table.iter().any(|(link, _)| {
-        let link = link.as_os_str().as_bytes();
-        link.len() == parent.len() + 1 + name.len()
-            && link.starts_with(parent)
-            && link[parent.len()] == b'/'
-            && link.ends_with(name)
+    path.len() == parent.len() + 1 + name.len()
+        && path.starts_with(parent)
+        && path[parent.len()] == b'/'
+        && path.ends_with(name)
+}
+
+/// The firmlinks that work on this system, as link and data folder: both
+/// paths lead to the same folder.
+fn active_firmlinks() -> &'static [(PathBuf, PathBuf)] {
+    use std::os::unix::fs::MetadataExt;
+    static ACTIVE: OnceLock<Vec<(PathBuf, PathBuf)>> = OnceLock::new();
+    ACTIVE.get_or_init(|| {
+        crate::cache::firmlinks()
+            .iter()
+            .filter(
+                |(link, data)| match (std::fs::metadata(link), std::fs::metadata(data)) {
+                    (Ok(l), Ok(d)) => l.is_dir() && (l.dev(), l.ino()) == (d.dev(), d.ino()),
+                    _ => false,
+                },
+            )
+            .cloned()
+            .collect()
     })
+}
+
+/// Whether `parent/name` is the data folder of a firmlink inside `root`, such
+/// as /System/Volumes/Data/Users for /Users. A scan of `root` counts it at the
+/// firmlink, so it must not count it again.
+fn counted_at_firmlink(root: &Path, parent: &[u8], name: &[u8]) -> bool {
+    active_firmlinks()
+        .iter()
+        .any(|(link, data)| link.starts_with(root) && joins(data, parent, name))
 }
 
 struct Fd(libc::c_int);
@@ -125,6 +155,8 @@ pub(super) fn read_dir(
     attrs.fileattr =
         libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE | libc::ATTR_FILE_DATALENGTH;
 
+    // Only folders on the data volume can be the data folder of a firmlink.
+    let data_side = !ctx.one_fs && path.to_bytes().starts_with(b"/System/Volumes/Data");
     let mut seen = 0;
     BUF.with_borrow_mut(|buf| {
         loop {
@@ -153,7 +185,7 @@ pub(super) fn read_dir(
                 // SAFETY: the kernel wrote `n` packed entries, each starting with its length.
                 unsafe {
                     let len: u32 = read(p, 0);
-                    add_entry(ctx, fd.0, path.to_bytes(), p, dir, subdirs);
+                    add_entry(ctx, fd.0, path.to_bytes(), data_side, p, dir, subdirs);
                     p = p.add(len as usize);
                 }
             }
@@ -179,6 +211,7 @@ unsafe fn add_entry(
     ctx: &Ctx,
     fd: libc::c_int,
     parent: &[u8],
+    data_side: bool,
     p: *const u8,
     dir: &mut Dir,
     subdirs: &mut Vec<SubDir>,
@@ -214,9 +247,15 @@ unsafe fn add_entry(
                 Counts::default()
             };
             let index = dir.entries.len();
-            if ctx.one_fs && mount_status & DIR_MNTSTATUS_MNTPOINT != 0 {
+            let firmlink = counts.zero_is_empty && entry_count == 0 && is_firmlink(parent, name);
+            // With -x, a firmlink counts as a mount point: it leads to the
+            // data volume. Without -x, each folder of the data volume is
+            // counted once, at its firmlink if the scan has one.
+            if (ctx.one_fs && (mount_status & DIR_MNTSTATUS_MNTPOINT != 0 || firmlink))
+                || (data_side && counted_at_firmlink(ctx.root, parent, name))
+            {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
-            } else if counts.zero_is_empty && entry_count == 0 && !is_firmlink(parent, name) {
+            } else if counts.zero_is_empty && entry_count == 0 && !firmlink {
                 // An empty directory needs no open, listing, and close.
                 dir.push(name, Kind::Dir, 0, 0, 0);
                 dir.attach(
@@ -319,23 +358,61 @@ mod tests {
     }
 
     #[test]
-    fn firmlinks_are_found_below_the_root_and_deeper() {
-        let table = [
-            (
-                PathBuf::from("/Users"),
-                PathBuf::from("/System/Volumes/Data/Users"),
-            ),
-            (
-                PathBuf::from("/usr/libexec/cups"),
-                PathBuf::from("/System/Volumes/Data/usr/libexec/cups"),
-            ),
-        ];
-        assert!(super::is_firmlink_in(&table, b"/", b"Users"));
-        assert!(super::is_firmlink_in(&table, b"/usr/libexec", b"cups"));
-        assert!(super::is_firmlink_in(&table, b"/usr/libexec/", b"cups"));
-        assert!(!super::is_firmlink_in(&table, b"/usr", b"cups"));
-        assert!(!super::is_firmlink_in(&table, b"/usr/libexec", b"cup"));
-        assert!(!super::is_firmlink_in(&table, b"/", b"Use"));
+    fn paths_are_matched_below_the_root_and_deeper() {
+        let (users, cups) = (Path::new("/Users"), Path::new("/usr/libexec/cups"));
+        assert!(super::joins(users, b"/", b"Users"));
+        assert!(super::joins(cups, b"/usr/libexec", b"cups"));
+        assert!(super::joins(cups, b"/usr/libexec/", b"cups"));
+        assert!(!super::joins(cups, b"/usr", b"cups"));
+        assert!(!super::joins(cups, b"/usr/libexec", b"cup"));
+        assert!(!super::joins(users, b"/", b"Use"));
+    }
+
+    /// A scan of / counts the users folder at /Users, so not again below
+    /// /System/Volumes/Data. A scan of the data volume counts it there.
+    #[test]
+    fn a_firmlinked_data_folder_counts_once() {
+        if !super::active_firmlinks()
+            .iter()
+            .any(|(link, _)| link == Path::new("/Users"))
+        {
+            eprintln!("skipped: /Users is not a firmlink here");
+            return;
+        }
+        let data = b"/System/Volumes/Data";
+        assert!(super::counted_at_firmlink(Path::new("/"), data, b"Users"));
+        assert!(super::counted_at_firmlink(
+            Path::new("/"),
+            b"/System/Volumes/Data/",
+            b"Users"
+        ));
+        assert!(!super::counted_at_firmlink(
+            Path::new("/System/Volumes/Data"),
+            data,
+            b"Users"
+        ));
+        assert!(!super::counted_at_firmlink(Path::new("/"), data, b"Other"));
+    }
+
+    /// With -x, a firmlink leads to another volume, like a mount point.
+    #[test]
+    fn with_one_file_system_a_firmlink_is_not_followed() {
+        let root = Path::new("/usr/libexec");
+        if !super::active_firmlinks()
+            .iter()
+            .any(|(link, _)| link == Path::new("/usr/libexec/cups"))
+        {
+            eprintln!("skipped: /usr/libexec/cups is not a firmlink here");
+            return;
+        }
+        let opts = Options {
+            one_fs: true,
+            ..opts()
+        };
+        let dir = scan(root, &opts, &Progress::default()).unwrap();
+        let cups = entry(&dir, "cups");
+        assert!(cups.has(crate::tree::flag::OTHER_FS));
+        assert!(cups.dir.is_none());
     }
 
     /// A firmlink placeholder such as /Users reports 0 entries. Without the
