@@ -87,7 +87,7 @@ You usually open a disk analyzer because the disk is full. Many folders have not
 | Comparison | macOS | Linux |
 | --- | --- | --- |
 | Cold disk, against ncdu with its defaults (1 thread) | 5.3x faster | 4.5x faster |
-| Cold disk, against ncdu at its fastest cold setting (`-t 64`) | 1.17x faster | about even (0.95x) |
+| Cold disk, against ncdu at its fastest cold setting (`-t 64`) | 1.17x faster | ncdu about 5% faster (0.94x to 0.96x) |
 | Warm cache, against ncdu at its best (`-t <cores>`) | 1.5x to 1.8x faster | about even (1.05x) |
 | Repeat scan of a folder with the cache (macOS only) | 0.05 s instead of 2 to 4 s | no cache |
 
@@ -100,7 +100,7 @@ How the numbers were measured:
 Why minimenta is faster:
 
 - **More threads.** A scan mostly waits on the disk and the kernel, so minimenta uses at least 16 threads. ncdu uses 1 thread unless you pass `-t`.
-- **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there, and with the same thread count they are about even.
+- **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there. On a cold Linux disk, reading the directory blocks takes almost all the time, and the order of those reads decides the speed. ncdu's order is about 5% faster there (8 cold pairs on `/usr`).
 - **The cache on macOS.** minimenta keeps the last scan of each folder in `~/Library/Caches/minimenta` and asks FSEvents which directories changed since. It lists only those again. The browser says when it shows a cached scan, and `r` scans everything again.
 
 The goal of 2x over ncdu at its best is not reached on a cold disk.
