@@ -1,0 +1,27 @@
+[advisories]
+# Fail on yanked crates too, not only on advisories.
+yanked = "deny"
+
+[licenses]
+# Each entry is a license that at least one crate in the tree needs. Remove
+# an entry and `cargo deny check licenses` fails. Do not add a license that
+# no crate needs. Crates with a choice, such as `MIT OR Apache-2.0`, pass
+# with any one of their licenses.
+allow = [
+    "Apache-2.0",  # ryu (Apache-2.0 OR BSL-1.0), and most other crates as one choice
+    "MIT",         # crates that offer only MIT, such as ratatui and crossterm
+    "Unicode-3.0", # unicode-ident
+    "Zlib",        # foldhash
+]
+confidence-threshold = 0.8
+
+[bans]
+# Two versions of a crate are common in a tree this size.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

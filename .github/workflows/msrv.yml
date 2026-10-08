@@ -1,0 +1,45 @@
+name: MSRV
+
+# Proves that the code and Cargo.lock build with the rust-version in Cargo.toml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  msrv:
+    name: Build with the minimum Rust version (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the Rust version from Cargo.toml
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ -z "$msrv" ]; then
+            echo "::error::Cargo.toml has no rust-version."
+            exit 1
+          fi
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          rustup default "$msrv"
+          rustc --version
+          case "$(rustc --version)" in
+            "rustc $msrv "* | "rustc $msrv."*) ;;
+            *)
+              echo "::error::Expected Rust $msrv, but rustc says: $(rustc --version)"
+              exit 1
+              ;;
+          esac
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --all-targets
