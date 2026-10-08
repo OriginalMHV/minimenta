@@ -157,6 +157,12 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
 const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(windows)]
 const MFT_START_RATE: f64 = 150_000.0;
+/// A listing slower than `MFT_EARLY_RATE` over its first `MFT_EARLY` is
+/// clearly cold, so the reader starts without waiting for a full window.
+#[cfg(windows)]
+const MFT_EARLY: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(windows)]
+const MFT_EARLY_RATE: f64 = 40_000.0;
 
 /// Starts the MFT reader next to the directory listing and keeps the result
 /// that finishes first. The MFT reader must read the table of the whole
@@ -204,21 +210,31 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
 #[cfg(windows)]
 fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
     let mut last = (std::time::Instant::now(), 0);
+    let mut early = true;
     loop {
-        std::thread::park_timeout(MFT_WINDOW);
+        let (window, threshold) = if early {
+            (MFT_EARLY, MFT_EARLY_RATE)
+        } else {
+            (MFT_WINDOW, MFT_START_RATE)
+        };
+        std::thread::park_timeout(window);
         if done.load(Relaxed) {
             return false;
         }
         let now = std::time::Instant::now();
-        if now - last.0 < MFT_WINDOW {
+        if now - last.0 < window {
             continue;
         }
         let items = progress.items.load(Relaxed);
         let rate = (items - last.1) as f64 / (now - last.0).as_secs_f64();
-        if rate < MFT_START_RATE {
+        if rate < threshold {
             return true;
         }
-        last = (now, items);
+        // The first full window still counts from the start.
+        if !early {
+            last = (now, items);
+        }
+        early = false;
     }
 }
 
