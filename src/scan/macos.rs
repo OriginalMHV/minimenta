@@ -7,7 +7,7 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::slice;
 
-use super::Ctx;
+use super::{Ctx, SubDir};
 use crate::tree::{Dir, Kind, flag};
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
@@ -35,7 +35,7 @@ pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
     dir: &mut Dir,
-    subdirs: &mut Vec<(usize, u32)>,
+    subdirs: &mut Vec<SubDir>,
     expected: u32,
 ) -> io::Result<()> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -107,7 +107,7 @@ unsafe fn read<T: Copy>(p: *const u8, offset: usize) -> T {
 /// attributes and everything else carries the file attributes, never both.
 /// `FSOPT_PACK_INVAL_ATTRS` keeps every slot inside a group, so the offsets
 /// are fixed.
-unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<(usize, u32)>) {
+unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
     unsafe {
         let mut o = size_of::<u32>() + size_of::<libc::attribute_set_t>();
         let error: u32 = read(p, o);
@@ -134,7 +134,11 @@ unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<(u
             if ctx.one_fs && mount_status & DIR_MNTSTATUS_MNTPOINT != 0 {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
-                subdirs.push((dir.entries.len(), entry_count));
+                subdirs.push(SubDir {
+                    index: dir.entries.len(),
+                    expected: entry_count,
+                    ino,
+                });
                 dir.push(name, Kind::Dir, 0, 0, 0);
             }
             return;
@@ -148,8 +152,13 @@ unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<(u
             VLNK => Kind::Symlink,
             _ => Kind::Other,
         };
-        let shared = nlink > 1 && !ctx.first_link(dev as u64, ino);
-        let flags = if shared { flag::HARDLINK } else { 0 };
+        let mut flags = 0;
+        if nlink > 1 {
+            flags |= flag::MULTI_LINK;
+            if !ctx.first_link(dev as u64, ino) {
+                flags |= flag::HARDLINK;
+            }
+        }
         dir.push(name, kind, alloc.max(0) as u64, data.max(0) as u64, flags);
     }
 }

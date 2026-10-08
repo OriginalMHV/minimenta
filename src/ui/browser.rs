@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 
 use super::progress::{self, Outcome};
 use super::view;
+use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
 use crate::tree::{Dir, Sort, SortKey, Tree, flag};
 
@@ -38,6 +39,9 @@ pub struct Browser {
     pub list_height: usize,
     range: Option<Range>,
     opts: Options,
+    /// Set when a rescan or delete corrected the tree, so it is saved on quit.
+    session: Option<Header>,
+    changed: bool,
 }
 
 enum Action {
@@ -50,7 +54,13 @@ enum Action {
     Rescan,
 }
 
-pub fn run(terminal: &mut DefaultTerminal, tree: Tree, opts: Options) -> io::Result<()> {
+pub fn run(
+    terminal: &mut DefaultTerminal,
+    tree: Tree,
+    opts: Options,
+    source: Source,
+    session: Option<Header>,
+) -> io::Result<()> {
     let mut browser = Browser {
         tree,
         stack: Vec::new(),
@@ -58,12 +68,21 @@ pub fn run(terminal: &mut DefaultTerminal, tree: Tree, opts: Options) -> io::Res
         offset: 0,
         sort: Sort::default(),
         mode: Mode::Browse,
-        message: None,
+        message: describe(&source),
         list_height: 1,
         range: None,
         opts,
+        session,
+        changed: false,
     };
+    browser.apply_sort();
     let result = browser.event_loop(terminal);
+    // Without this, the next run would load the stale tree again.
+    if browser.changed
+        && let Some(session) = browser.session.take()
+    {
+        cache::save_in_background(session, &browser.tree.dir);
+    }
     // Freeing millions of nodes takes time and the process ends right after.
     std::mem::forget(browser);
     result
@@ -331,6 +350,7 @@ impl Browser {
             }
         }
         self.tree.refresh_totals(&self.stack);
+        self.changed = true;
         self.clear_selection();
         self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
         self.resort();
@@ -349,10 +369,20 @@ impl Browser {
 
     fn rescan(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let path = self.current_path();
-        match progress::scan(terminal, &path, self.opts)? {
+        let opts = Options {
+            cache: false,
+            ..self.opts
+        };
+        match progress::scan(terminal, &path, opts)? {
             Outcome::Done(fresh) => {
-                *self.tree.dir_at_mut(&self.stack) = fresh;
+                *self.tree.dir_at_mut(&self.stack) = fresh.dir;
                 self.tree.refresh_totals(&self.stack);
+                self.changed = true;
+                if self.stack.is_empty()
+                    && let Some(session) = &mut self.session
+                {
+                    session.full_scan_at = cache::now();
+                }
                 self.range = None;
                 self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
                 self.resort();
@@ -363,6 +393,27 @@ impl Browser {
         }
         Ok(())
     }
+}
+
+/// Says when the tree came from the cache, so stale data never looks fresh.
+fn describe(source: &Source) -> Option<String> {
+    let Source::Cached { listed, age_secs } = *source else {
+        return None;
+    };
+    let age = match age_secs {
+        0..60 => "less than a minute".to_string(),
+        60..3600 => format!("{} min", age_secs / 60),
+        3600..86400 => format!("{} h", age_secs / 3600),
+        _ => format!("{} days", age_secs / 86400),
+    };
+    let dirs = if listed == 1 {
+        "directory"
+    } else {
+        "directories"
+    };
+    Some(format!(
+        "Cached scan: {listed} changed {dirs} listed again, last full scan {age} ago. Press r to rescan."
+    ))
 }
 
 fn set_selected(e: &mut crate::tree::Entry, on: bool) {

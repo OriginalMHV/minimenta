@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
@@ -39,6 +39,8 @@ use generic as platform;
 pub struct Options {
     pub one_fs: bool,
     pub threads: usize,
+    /// Load and save the cache (macOS only).
+    pub cache: bool,
 }
 
 #[derive(Default)]
@@ -87,7 +89,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = CString::new(path.as_os_str().as_bytes())?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, meta.ino()));
     // The macOS scanner does not count directory blocks, so the root does not either.
     if cfg!(not(target_os = "macos")) {
         dir.own_disk = meta.blocks() * 512;
@@ -106,9 +108,261 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     }
 }
 
+/// A subdirectory found by `read_dir`, to be scanned next.
+pub struct SubDir {
+    /// Position of the entry in the listed directory.
+    pub index: usize,
+    /// Entry count from the listing, or 0 when unknown.
+    pub expected: u32,
+    /// Inode of the subdirectory, or 0 when unknown.
+    pub ino: u64,
+}
+
+/// A directory below the root that must be listed again. The incremental
+/// update is only used with the cache, which needs FSEvents (macOS).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Change<'a> {
+    pub path: &'a Path,
+    /// List the whole subtree again, not only the directory itself.
+    pub recursive: bool,
+}
+
+/// Updates a cached tree in place. Each changed directory is listed again,
+/// one level deep. Unchanged subdirectories keep their cached subtrees, and new
+/// subdirectories are scanned completely. Returns the number of directories
+/// listed again.
+///
+/// Fails when the root cannot be listed again, so the caller can scan fully.
+///
+/// Limits: hard links found again are counted as first links, so a file with
+/// several links can be counted twice. A directory that is renamed away,
+/// changed, and renamed back keeps its cached contents. The cache age limit
+/// and a rescan with `r` repair both.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn update(
+    dir: &mut Dir,
+    root: &Path,
+    changes: &[Change],
+    opts: &Options,
+    progress: &Progress,
+) -> io::Result<usize> {
+    let meta = fs::metadata(root)?;
+    let ctx = Ctx {
+        one_fs: opts.one_fs,
+        root_dev: meta.dev(),
+        progress,
+        hardlinks: Mutex::default(),
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(opts.threads)
+        .stack_size(16 << 20)
+        .build()
+        .map_err(io::Error::other)?;
+
+    // Parents first, so a child change lands in the freshly listed parent.
+    // Changes below a recursive change are covered by it.
+    let mut targets: Vec<(Vec<&[u8]>, bool)> = changes
+        .iter()
+        .filter_map(|c| Some((relative(root, c.path)?, c.recursive)))
+        .collect();
+    targets.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+    targets.dedup_by(|later, earlier| {
+        earlier.0 == later.0 && {
+            earlier.1 |= later.1;
+            true
+        }
+    });
+    let recursive: Vec<Vec<&[u8]>> = targets
+        .iter()
+        .filter(|t| t.1)
+        .map(|t| t.0.clone())
+        .collect();
+    targets.retain(|(path, _)| {
+        !recursive
+            .iter()
+            .any(|r| r.len() < path.len() && path.starts_with(r))
+    });
+
+    let root_bytes = root.as_os_str().as_bytes();
+    let mut listed = 0;
+    pool.install(|| {
+        for (components, recursive) in &targets {
+            if ctx.progress.cancel.load(Relaxed) {
+                break;
+            }
+            let mut path = root_bytes.to_vec();
+            for c in components {
+                if !path.ends_with(b"/") {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(c);
+            }
+            // SAFETY: built from a valid path and file names, neither contains NUL.
+            let path = unsafe { CString::from_vec_unchecked(path) };
+            let Some((target, entry_flags)) = locate(dir, components) else {
+                continue;
+            };
+            let old = std::mem::take(target);
+            // The parent listing holds a directory's own blocks, so keep them.
+            let (id, own_disk) = (old.id, old.own_disk);
+            let (mut fresh, result) = if *recursive {
+                scan_dir(&ctx, path, 0, id)
+            } else {
+                relist(&ctx, path, old)
+            };
+            fresh.own_disk = own_disk;
+            *target = fresh;
+            match entry_flags {
+                Some(flags) => {
+                    *flags &= !flag::ERROR;
+                    if result.is_err() {
+                        *flags |= flag::ERROR;
+                    }
+                }
+                None => result?,
+            }
+            listed += 1;
+        }
+        Ok::<_, io::Error>(())
+    })?;
+    if ctx.progress.cancel.load(Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
+    }
+    fix_totals(dir);
+    dir.sort(Sort::default());
+    Ok(listed)
+}
+
+/// The path components of `path` below `root`, or `None` when it is outside.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn relative<'p>(root: &Path, path: &'p Path) -> Option<Vec<&'p [u8]>> {
+    let rest = path.strip_prefix(root).ok()?;
+    rest.components()
+        .map(|c| match c {
+            Component::Normal(name) => Some(name.as_bytes()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Finds the directory at `components` and marks every entry on the way as
+/// dirty. Returns the directory and the flags of its entry in the parent
+/// (`None` for the root). Missing directories are skipped: the change event
+/// of their parent covers them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn locate<'d>(dir: &'d mut Dir, components: &[&[u8]]) -> Option<(&'d mut Dir, Option<&'d mut u8>)> {
+    let Some((last, ancestors)) = components.split_last() else {
+        return Some((dir, None));
+    };
+    let mut current = dir;
+    for name in ancestors {
+        let i = current.find(name)?;
+        let e = &mut current.entries[i];
+        e.flags |= flag::DIRTY;
+        current = e.dir.as_deref_mut()?;
+    }
+    let i = current.find(last)?;
+    let e = &mut current.entries[i];
+    e.flags |= flag::DIRTY;
+    let sub = e.dir.as_deref_mut()?;
+    Some((sub, Some(&mut e.flags)))
+}
+
+/// Lists one directory again and moves the cached subtrees of its unchanged
+/// subdirectories into the new listing. A subtree is unchanged when the name
+/// and the inode match and it was readable last time. Anything else, such as
+/// a directory replaced by another one with the same name, is scanned fully.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn relist(ctx: &Ctx, path: CString, mut old: Dir) -> (Dir, io::Result<()>) {
+    let mut fresh = Dir {
+        id: old.id,
+        ..Dir::default()
+    };
+    let mut subdirs = Vec::new();
+    let result = platform::read_dir(ctx, &path, &mut fresh, &mut subdirs, 0);
+    ctx.progress
+        .items
+        .fetch_add(fresh.entries.len() as u64, Relaxed);
+
+    // A map keeps this linear for directories with many subdirectories.
+    let Dir { names, entries, .. } = &mut old;
+    let by_name: std::collections::HashMap<&[u8], usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(j, e)| (&names[e.name_start as usize..][..e.name_len as usize], j))
+        .collect();
+    let mut new_subdirs = Vec::new();
+    for sub in subdirs {
+        let cached = by_name
+            .get(fresh.name(&fresh.entries[sub.index]))
+            .and_then(|&j| {
+                let e = &mut entries[j];
+                let same = sub.ino != 0 && e.dir.as_ref()?.id == sub.ino;
+                if !same || e.has(flag::ERROR) {
+                    return None;
+                }
+                e.dir.take()
+            });
+        match cached {
+            Some(mut tree) => {
+                tree.own_disk = fresh.entries[sub.index].disk;
+                fresh.attach(sub.index, *tree, 0);
+            }
+            None => new_subdirs.push(sub),
+        }
+    }
+    let parent = path.as_bytes();
+    let scanned: Vec<_> = new_subdirs
+        .par_iter()
+        .map(|sub| {
+            let name = fresh.name(&fresh.entries[sub.index]);
+            scan_dir(ctx, child_path(parent, name), sub.expected, sub.ino)
+        })
+        .collect();
+    for (sub, (mut tree, result)) in new_subdirs.iter().zip(scanned) {
+        tree.own_disk = fresh.entries[sub.index].disk;
+        fresh.attach(
+            sub.index,
+            tree,
+            if result.is_err() { flag::ERROR } else { 0 },
+        );
+    }
+    fresh.sort(Sort::default());
+    (fresh, result)
+}
+
+/// Recomputes the totals of dirty entries from their contents, deepest first,
+/// and sorts the directories whose entries changed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fix_totals(dir: &mut Dir) {
+    let mut changed = false;
+    for e in &mut dir.entries {
+        if !e.has(flag::DIRTY) {
+            continue;
+        }
+        e.flags &= !(flag::DIRTY | flag::SUB_ERROR);
+        if let Some(sub) = e.dir.as_deref_mut() {
+            fix_totals(sub);
+            let t = sub.totals();
+            (e.disk, e.apparent, e.items) = (t.disk, t.apparent, 1 + t.items);
+            if sub.has_error() {
+                e.flags |= flag::SUB_ERROR;
+            }
+        }
+        changed = true;
+    }
+    if changed {
+        dir.sort(Sort::default());
+    }
+}
+
 /// `expected` is the entry count from the parent listing, or 0 when unknown.
-fn scan_dir(ctx: &Ctx, path: CString, expected: u32) -> (Dir, io::Result<()>) {
-    let mut dir = Dir::default();
+/// `id` is the inode of the directory, or 0 when unknown.
+fn scan_dir(ctx: &Ctx, path: CString, expected: u32, id: u64) -> (Dir, io::Result<()>) {
+    let mut dir = Dir {
+        id,
+        ..Dir::default()
+    };
     if ctx.progress.cancel.load(Relaxed) {
         return (dir, Ok(()));
     }
@@ -126,14 +380,19 @@ fn scan_dir(ctx: &Ctx, path: CString, expected: u32) -> (Dir, io::Result<()>) {
         let parent = path.as_bytes();
         let scanned: Vec<_> = subdirs
             .par_iter()
-            .map(|&(i, expected)| {
-                scan_dir(ctx, child_path(parent, dir.name(&dir.entries[i])), expected)
+            .map(|sub| {
+                let name = dir.name(&dir.entries[sub.index]);
+                scan_dir(ctx, child_path(parent, name), sub.expected, sub.ino)
             })
             .collect();
-        for (&(i, _), (mut sub, result)) in subdirs.iter().zip(scanned) {
+        for (sub, (mut tree, result)) in subdirs.iter().zip(scanned) {
             // The listing stored the directory's own blocks in its entry.
-            sub.own_disk = dir.entries[i].disk;
-            dir.attach(i, sub, if result.is_err() { flag::ERROR } else { 0 });
+            tree.own_disk = dir.entries[sub.index].disk;
+            dir.attach(
+                sub.index,
+                tree,
+                if result.is_err() { flag::ERROR } else { 0 },
+            );
         }
     }
     (dir, result)
@@ -169,6 +428,7 @@ mod tests {
         Options {
             one_fs: false,
             threads: 4,
+            cache: false,
         }
     }
 
@@ -235,6 +495,36 @@ mod tests {
         assert_eq!(alias.kind, Kind::Symlink);
         assert!(alias.dir.is_none());
         assert!(dir.totals().apparent < 40_000);
+    }
+
+    /// A parent that is listed again must not reuse a child subtree that
+    /// could not be read last time, even when the name and inode match.
+    #[test]
+    fn relisting_a_parent_scans_a_child_that_was_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("a/x")).unwrap();
+        write(&root.join("a/x/big.bin"), 30_000);
+        let mut dir = scan(&root, &opts(), &Progress::default()).unwrap();
+        let a = dir.find(b"a").unwrap();
+        let a_dir = dir.entries[a].dir.as_deref_mut().unwrap();
+        let x = a_dir.find(b"x").unwrap();
+        let id = a_dir.entries[x].dir.as_ref().unwrap().id;
+        a_dir.entries[x].dir = Some(Box::new(Dir {
+            id,
+            ..Dir::default()
+        }));
+        a_dir.entries[x].flags |= flag::ERROR;
+
+        let a_path = root.join("a");
+        let changes = [Change {
+            path: &a_path,
+            recursive: false,
+        }];
+        update(&mut dir, &root, &changes, &opts(), &Progress::default()).unwrap();
+
+        assert_eq!(dir.totals().apparent, 30_000);
+        assert!(!dir.has_error());
     }
 
     #[test]

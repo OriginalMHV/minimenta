@@ -35,16 +35,13 @@ fn run_screens(
             },
         };
         match progress::scan(terminal, &path, opts)? {
-            Outcome::Done(dir) => {
+            Outcome::Done(scan) => {
                 let path = path.canonicalize().unwrap_or(path);
-                return browser::run(
-                    terminal,
-                    Tree {
-                        path,
-                        dir: Box::new(dir),
-                    },
-                    opts,
-                );
+                let tree = Tree {
+                    path,
+                    dir: Box::new(scan.dir),
+                };
+                return browser::run(terminal, tree, opts, scan.source, scan.session);
             }
             Outcome::Cancelled => prompt.set_path(&path),
             Outcome::Quit => return Ok(()),
