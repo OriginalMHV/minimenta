@@ -36,6 +36,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: brew install ncdu
       - run: bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Cold and warm thread sweep (experiment)
+        run: bench/cold-sweep.sh /System/Library 3 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |
           cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
