@@ -131,7 +131,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     }
     #[cfg(windows)]
     if opts.mft {
-        match mft::scan(path, progress) {
+        match mft::scan(path, opts.threads, progress) {
             Ok(Some(mut dir)) => {
                 progress.mft.store(true, Relaxed);
                 dir.sort(Sort::default());

@@ -348,23 +348,24 @@ struct Link {
     name_len: u32,
 }
 
-/// Everything the tree needs from the MFT, collected record by record.
+/// What one block of records adds to the table. Threads fill parts in
+/// parallel, and the table merges them in block order, so the result does not
+/// depend on timing (for example which hard link counts first).
 #[derive(Default)]
-pub struct Table {
-    recs: Vec<Rec>,
+pub struct Part {
+    updates: Vec<Update>,
     links: Vec<Link>,
     names: Vec<u8>,
 }
 
-impl Table {
-    pub fn with_capacity(records: usize) -> Self {
-        Table {
-            recs: Vec::with_capacity(records),
-            links: Vec::with_capacity(records),
-            names: Vec::with_capacity(records * 16),
-        }
-    }
+struct Update {
+    target: u32,
+    /// Set by the base record, not by its extension records.
+    base: Option<(u16, u8)>,
+    data: Option<DataSize>,
+}
 
+impl Part {
     /// Adds the record at `index`. Extension records add their names and
     /// data sizes to their base record.
     pub fn add(&mut self, index: u32, record: &Record) {
@@ -375,19 +376,17 @@ impl Table {
         }) else {
             return;
         };
-        if self.recs.len() <= target as usize {
-            self.recs.resize(target as usize + 1, Rec::default());
-        }
-        let rec = &mut self.recs[target as usize];
-        if record.base == 0 {
-            rec.seq = record.seq;
-            rec.flags = (u8::from(record.in_use) * IN_USE)
+        let base = (record.base == 0).then(|| {
+            let flags = (u8::from(record.in_use) * IN_USE)
                 | (u8::from(record.directory) * DIRECTORY)
                 | (u8::from(record.reparse) * REPARSE);
-        }
-        if let Some(data) = record.data {
-            (rec.disk, rec.apparent) = (data.allocated, data.apparent);
-        }
+            (record.seq, flags)
+        });
+        self.updates.push(Update {
+            target,
+            base,
+            data: record.data,
+        });
         for name in record.names.iter().filter(|n| n.namespace != NAMESPACE_DOS) {
             let Ok(parent) = u32::try_from(name.parent) else {
                 continue;
@@ -403,7 +402,58 @@ impl Table {
                 name_start,
                 name_len: self.names.len() as u32 - name_start,
             });
-            self.recs[target as usize].names += 1;
+        }
+    }
+}
+
+/// Everything the tree needs from the MFT, collected record by record.
+#[derive(Default)]
+pub struct Table {
+    recs: Vec<Rec>,
+    links: Vec<Link>,
+    names: Vec<u8>,
+}
+
+impl Table {
+    pub fn with_capacity(records: usize) -> Self {
+        Table {
+            recs: Vec::with_capacity(records),
+            links: Vec::with_capacity(records),
+            names: Vec::with_capacity(records * 32),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn add(&mut self, index: u32, record: &Record) {
+        let mut part = Part::default();
+        part.add(index, record);
+        self.merge(part);
+    }
+
+    pub fn merge(&mut self, part: Part) {
+        for update in part.updates {
+            let target = update.target as usize;
+            if self.recs.len() <= target {
+                self.recs.resize(target + 1, Rec::default());
+            }
+            let rec = &mut self.recs[target];
+            if let Some((seq, flags)) = update.base {
+                (rec.seq, rec.flags) = (seq, flags);
+            }
+            if let Some(data) = update.data {
+                (rec.disk, rec.apparent) = (data.allocated, data.apparent);
+            }
+        }
+        let offset = self.names.len() as u32;
+        self.names.extend_from_slice(&part.names);
+        for mut link in part.links {
+            link.name_start += offset;
+            let target = link.record as usize;
+            if self.recs.len() <= target {
+                self.recs.resize(target + 1, Rec::default());
+            }
+            self.recs[target].names += 1;
+            self.links.push(link);
         }
     }
 

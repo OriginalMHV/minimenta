@@ -15,41 +15,69 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
     GetFileInformationByHandle, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
     GetVolumePathNameW, OPEN_EXISTING,
 };
 
 use super::Progress;
-use super::ntfs::{Table, apply_fixups, mft_extents, parse_boot, parse_record};
+use super::ntfs::{Part, Table, apply_fixups, mft_extents, parse_boot, parse_record};
 use crate::tree::Dir;
+use rayon::prelude::*;
 
-/// Large enough for sequential disk throughput, small enough for memory.
-const CHUNK: u64 = 16 << 20;
+/// Each task reads and parses this much. Several tasks run at once, so the
+/// disk always has several requests in flight.
+const CHUNK: u64 = 4 << 20;
 
-pub(super) fn scan(root: &Path, progress: &Progress) -> io::Result<Option<Dir>> {
+/// Unbuffered reads need buffers aligned to the sector size.
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct Page([u8; 4096]);
+
+fn pages(bytes: u64) -> Vec<Page> {
+    vec![Page([0; 4096]); bytes.div_ceil(4096) as usize]
+}
+
+fn as_bytes(pages: &mut [Page]) -> &mut [u8] {
+    // SAFETY: a Page is plain bytes, so the pages form one byte slice.
+    unsafe { std::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<u8>(), pages.len() * 4096) }
+}
+
+/// One block of the MFT: where it is on disk and its first record number.
+struct Task {
+    offset: u64,
+    len: u64,
+    first: u64,
+}
+
+pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Result<Option<Dir>> {
     let Some(volume) = open_volume(root) else {
         return Ok(None);
     };
     let root_record = record_number(root)?;
 
     // The boot sector is 512 bytes, but reads must cover whole sectors.
-    let mut first = vec![0u8; 4096];
-    read_at(&volume, &mut first, 0)?;
-    let Some(boot) = parse_boot(&first) else {
+    let mut first = pages(4096);
+    read_at(&volume, as_bytes(&mut first), 0)?;
+    let Some(boot) = parse_boot(as_bytes(&mut first)) else {
         return Ok(None);
     };
     // Records must not cross clusters, so a run always holds whole records.
     if !boot.cluster_size.is_multiple_of(boot.record_size as u64)
         || !CHUNK.is_multiple_of(boot.cluster_size)
+        || !4096u64.is_multiple_of(boot.bytes_per_sector)
     {
         return Ok(None);
     }
     let record_bytes = (boot.record_size as u64).next_multiple_of(boot.bytes_per_sector);
-    let mut record0 = vec![0u8; record_bytes as usize];
-    read_at(&volume, &mut record0, boot.mft_offset)?;
-    let record0 = &mut record0[..boot.record_size];
+    let mut buf0 = pages(record_bytes);
+    read_at(
+        &volume,
+        &mut as_bytes(&mut buf0)[..record_bytes as usize],
+        boot.mft_offset,
+    )?;
+    let record0 = &mut as_bytes(&mut buf0)[..boot.record_size];
     if !apply_fixups(record0) {
         return Ok(None);
     }
@@ -61,52 +89,77 @@ pub(super) fn scan(root: &Path, progress: &Progress) -> io::Result<Option<Dir>> 
         return Ok(None);
     };
 
-    // Temporary timing printout to find the cost of each phase.
-    let profile = std::env::var_os("MINIMENTA_PROFILE").is_some();
-    let started = std::time::Instant::now();
-    let mut read_time = std::time::Duration::ZERO;
-    let mut table = Table::with_capacity(capacity);
-    let mut buf = vec![0u8; CHUNK as usize];
+    let record_size = boot.record_size as u64;
+    let mut tasks = Vec::new();
     let mut index = 0u64;
     for run in runs {
         let run_bytes = run.clusters * boot.cluster_size;
-        let Some(lcn) = run.lcn else {
-            index += run_bytes / boot.record_size as u64;
-            continue;
-        };
-        let mut done = 0;
-        while done < run_bytes && index < total {
-            if progress.cancel.load(Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
+        if let Some(lcn) = run.lcn {
+            let mut done = 0;
+            while done < run_bytes && index + done / record_size < total {
+                let len = (run_bytes - done).min(CHUNK);
+                let first = index + done / record_size;
+                tasks.push(Task {
+                    offset: lcn * boot.cluster_size + done,
+                    len,
+                    first,
+                });
+                done += len;
             }
-            let len = (run_bytes - done).min(CHUNK) as usize;
-            let t = std::time::Instant::now();
-            read_at(&volume, &mut buf[..len], lcn * boot.cluster_size + done)?;
-            read_time += t.elapsed();
-            for record in buf[..len].chunks_exact_mut(boot.record_size) {
-                if index >= total {
-                    break;
-                }
-                if apply_fixups(record)
-                    && let Some(parsed) = parse_record(record)
-                {
-                    table.add(index as u32, &parsed);
-                }
-                index += 1;
-            }
-            done += len as u64;
-            progress.disk.fetch_add(len as u64, Relaxed);
         }
+        index += run_bytes / record_size;
     }
-    let parsed = started.elapsed();
+
+    // Temporary timing printout to find the cost of each phase.
+    let profile = std::env::var_os("MINIMENTA_PROFILE").is_some();
+    let started = std::time::Instant::now();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(io::Error::other)?;
+    let parts: Vec<io::Result<Part>> = pool.install(|| {
+        tasks
+            .par_iter()
+            .map_init(
+                || pages(CHUNK),
+                |buf, task| {
+                    if progress.cancel.load(Relaxed) {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
+                    }
+                    let bytes = &mut as_bytes(buf)[..task.len as usize];
+                    read_at(&volume, bytes, task.offset)?;
+                    progress.disk.fetch_add(task.len, Relaxed);
+                    let mut part = Part::default();
+                    for (i, record) in bytes.chunks_exact_mut(boot.record_size).enumerate() {
+                        let index = task.first + i as u64;
+                        if index >= total {
+                            break;
+                        }
+                        if apply_fixups(record)
+                            && let Some(parsed) = parse_record(record)
+                        {
+                            part.add(index as u32, &parsed);
+                        }
+                    }
+                    Ok(part)
+                },
+            )
+            .collect()
+    });
+    let read = started.elapsed();
+    let mut table = Table::with_capacity(capacity);
+    for part in parts {
+        table.merge(part?);
+    }
+    let merged = started.elapsed();
     let dir = table.build(root_record, progress);
     if profile {
         eprintln!(
-            "mft: {total} records ({} MiB), read {:.0} ms, parse {:.0} ms, build {:.0} ms",
+            "mft: {total} records ({} MiB), read and parse {:.0} ms, merge {:.0} ms, build {:.0} ms",
             size >> 20,
-            read_time.as_secs_f64() * 1e3,
-            (parsed - read_time).as_secs_f64() * 1e3,
-            (started.elapsed() - parsed).as_secs_f64() * 1e3
+            read.as_secs_f64() * 1e3,
+            (merged - read).as_secs_f64() * 1e3,
+            (started.elapsed() - merged).as_secs_f64() * 1e3
         );
     }
     Ok(Some(dir))
@@ -164,6 +217,8 @@ fn open_volume(root: &Path) -> Option<File> {
     device.push(0);
     flush(&device);
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Unbuffered: the table goes straight into our aligned buffers, and does
+    // not fill the file cache with data that is read once.
     // SAFETY: `device` is NUL-terminated.
     let handle = unsafe {
         CreateFileW(
@@ -172,7 +227,7 @@ fn open_volume(root: &Path) -> Option<File> {
             share,
             ptr::null(),
             OPEN_EXISTING,
-            0,
+            FILE_FLAG_NO_BUFFERING,
             ptr::null_mut(),
         )
     };
@@ -301,7 +356,7 @@ mod tests {
         let symlink = std::os::windows::fs::symlink_dir(root.join("a"), root.join("alias")).is_ok();
 
         let progress = Progress::default();
-        let Some(from_mft) = scan(&root, &progress).unwrap() else {
+        let Some(from_mft) = scan(&root, 4, &progress).unwrap() else {
             eprintln!("skipped: reading the master file table needs an administrator and NTFS");
             return;
         };
