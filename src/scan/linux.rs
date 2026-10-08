@@ -158,6 +158,7 @@ mod tests {
             one_fs: true,
             threads,
             cache: false,
+            mft: false,
         }
     }
 

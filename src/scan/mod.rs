@@ -38,6 +38,12 @@ mod generic;
 ))]
 use generic as platform;
 
+// The NTFS parser has no platform calls, so its tests run everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod ntfs;
+
+#[cfg(windows)]
+mod mft;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -79,6 +85,8 @@ pub struct Options {
     pub threads: usize,
     /// Load and save the cache (macOS only).
     pub cache: bool,
+    /// Read the NTFS master file table when possible (Windows, administrator).
+    pub mft: bool,
 }
 
 #[derive(Default)]
@@ -87,6 +95,8 @@ pub struct Progress {
     pub disk: AtomicU64,
     pub errors: AtomicU64,
     pub cancel: AtomicBool,
+    /// Set when the scan read the NTFS master file table.
+    pub mft: AtomicBool,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device
@@ -118,6 +128,23 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
             io::ErrorKind::NotADirectory,
             "not a directory",
         ));
+    }
+    #[cfg(windows)]
+    if opts.mft {
+        match mft::scan(path, progress) {
+            Ok(Some(mut dir)) => {
+                progress.mft.store(true, Relaxed);
+                dir.sort(Sort::default());
+                return Ok(dir);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+            // Anything else, for example a read error, falls back to listing
+            // the directories.
+            _ => {
+                progress.items.store(0, Relaxed);
+                progress.disk.store(0, Relaxed);
+            }
+        }
     }
     let ctx = Ctx {
         one_fs: opts.one_fs,
@@ -475,6 +502,7 @@ mod tests {
             one_fs: false,
             threads: 4,
             cache: false,
+            mft: false,
         }
     }
 
