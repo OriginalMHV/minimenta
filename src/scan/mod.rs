@@ -357,11 +357,6 @@ pub fn update(
         hardlinks: Mutex::default(),
         stop: &AtomicBool::new(false),
     };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(opts.threads)
-        .stack_size(16 << 20)
-        .build()
-        .map_err(io::Error::other)?;
 
     // Parents first, so a child change lands in the freshly listed parent.
     // Changes below a recursive change are covered by it.
@@ -386,6 +381,20 @@ pub fn update(
             .iter()
             .any(|r| r.len() < path.len() && path.starts_with(r))
     });
+    // A repeat scan often finds nothing to list, and then needs no threads.
+    if targets.is_empty() {
+        if ctx.stopped() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
+        }
+        fix_totals(dir);
+        dir.sort(Sort::default());
+        return Ok(false);
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(opts.threads)
+        .stack_size(16 << 20)
+        .build()
+        .map_err(io::Error::other)?;
 
     let native_root = native(root)?;
     pool.install(|| {
@@ -732,6 +741,21 @@ mod tests {
 
         assert_eq!(dir.totals().apparent, 30_000);
         assert!(!dir.has_error());
+    }
+
+    #[test]
+    fn an_update_with_nothing_to_list_still_stops_on_cancel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let mut dir = scan(&root, &opts(), &Progress::default()).unwrap();
+        let progress = Progress::default();
+        progress.cancel.store(true, Relaxed);
+
+        let err = update(&mut dir, &root, &[], &opts(), &progress)
+            .err()
+            .unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

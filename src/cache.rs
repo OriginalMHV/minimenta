@@ -95,7 +95,14 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::Duration;
 
-    let (header, mut dir) = load(root)?;
+    let bytes = std::sync::Arc::new(fs::read(file_for(root)?).ok()?);
+    let (header, start) = decode_header(&bytes)?;
+    // Decoding a large tree takes about as long as the checks and the
+    // FSEvents replay below, so both run at the same time if a thread starts.
+    let shared = std::sync::Arc::clone(&bytes);
+    let decoder = std::thread::Builder::new()
+        .spawn(move || decode_tree(&shared[start..]))
+        .ok();
     let (dev, ino) = identity(root)?;
     // FSEvents reports nothing for a root that can no longer be read, so check
     // it directly. The full scan then reports the error.
@@ -163,6 +170,10 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     reported.dedup();
     let listed = reported.len();
 
+    let mut dir = match decoder {
+        Some(thread) => thread.join().ok()??,
+        None => decode_tree(&bytes[start..])?,
+    };
     let before = (dir.totals(), error_count(&dir));
     if let Err(e) = apply(&mut dir, root, changes, opts, progress)? {
         return Some(Err(e));
@@ -576,7 +587,14 @@ fn encode_dir(out: &mut Vec<u8>, dir: &Dir) {
     }
 }
 
-pub fn decode(bytes: &[u8]) -> Option<(Header, Dir)> {
+#[cfg(test)]
+fn decode(bytes: &[u8]) -> Option<(Header, Dir)> {
+    let (header, start) = decode_header(bytes)?;
+    Some((header, decode_tree(&bytes[start..])?))
+}
+
+/// Returns the header and the position where the tree starts.
+fn decode_header(bytes: &[u8]) -> Option<(Header, usize)> {
     let mut r = Reader { bytes, pos: 0 };
     if r.take(8)? != MAGIC || r.u32()? != VERSION {
         return None;
@@ -612,20 +630,35 @@ pub fn decode(bytes: &[u8]) -> Option<(Header, Dir)> {
         saved_at: r.u64()?,
         full_scan_at: r.u64()?,
     };
-    let dir = decode_dir(&mut r, 0)?;
-    (r.pos == bytes.len()).then_some((header, dir))
+    Some((header, r.pos))
 }
 
-/// A valid single path component: not empty, no `/`, no NUL, not `.` or `..`.
-/// Outside Unix the name must also be UTF-8, because there not every byte
-/// string is a valid `OsStr`.
+/// Decodes the tree that follows the header. The tree must fill `bytes`.
+fn decode_tree(bytes: &[u8]) -> Option<Dir> {
+    let mut r = Reader { bytes, pos: 0 };
+    let dir = decode_dir(&mut r, 0)?;
+    (r.pos == bytes.len()).then_some(dir)
+}
+
+/// Bytes that no stored name may contain. One check covers all names of a
+/// directory.
+fn valid_names(names: &[u8]) -> bool {
+    !names.contains(&b'/') && !names.contains(&0)
+}
+
+/// A valid single path component, taken from names that passed
+/// [`valid_names`]: not empty, not `.` or `..`. Outside Unix the name must
+/// also be UTF-8, because there not every byte string is a valid `OsStr`.
 fn valid_name(name: &[u8]) -> bool {
     !name.is_empty()
         && name != b"."
         && name != b".."
-        && !name.iter().any(|&b| b == b'/' || b == 0)
         && (cfg!(unix) || std::str::from_utf8(name).is_ok())
 }
+
+/// The fixed part of an encoded entry: name start and length, disk,
+/// apparent size, items, kind, flags, and whether a subtree follows.
+const ENTRY_BYTES: usize = 35;
 
 fn decode_dir(r: &mut Reader, depth: usize) -> Option<Dir> {
     if depth > MAX_DEPTH {
@@ -634,29 +667,33 @@ fn decode_dir(r: &mut Reader, depth: usize) -> Option<Dir> {
     let id = r.u64()?;
     let own_disk = r.u64()?;
     let names_len = r.u32()? as usize;
-    let names = r.take(names_len)?.to_vec();
+    let names = r.take(names_len)?;
+    if !valid_names(names) {
+        return None;
+    }
     let count = r.u32()? as usize;
-    let mut entries = Vec::with_capacity(count.min(r.remaining() / 35));
+    let mut entries = Vec::with_capacity(count.min(r.remaining() / ENTRY_BYTES));
     for _ in 0..count {
-        let name_start = r.u32()?;
-        let name_len = r.u32()?;
+        // One bounds check per entry instead of one per field.
+        let e: &[u8; ENTRY_BYTES] = r.take(ENTRY_BYTES)?.try_into().ok()?;
+        let u32_at = |o: usize| u32::from_le_bytes([e[o], e[o + 1], e[o + 2], e[o + 3]]);
+        let u64_at = |o: usize| u64::from(u32_at(o)) | u64::from(u32_at(o + 4)) << 32;
+        let (name_start, name_len) = (u32_at(0), u32_at(4));
         let name = names
             .get(name_start as usize..(name_start as usize).checked_add(name_len as usize)?)?;
         if !valid_name(name) {
             return None;
         }
-        let disk = r.u64()?;
-        let apparent = r.u64()?;
-        let items = r.u64()?;
-        let kind = match r.u8()? {
+        let (disk, apparent, items) = (u64_at(8), u64_at(16), u64_at(24));
+        let kind = match e[32] {
             0 => Kind::File,
             1 => Kind::Dir,
             2 => Kind::Symlink,
             3 => Kind::Other,
             _ => return None,
         };
-        let flags = r.u8()? & flag::PERSISTENT;
-        let dir = if r.u8()? != 0 {
+        let flags = e[33] & flag::PERSISTENT;
+        let dir = if e[34] != 0 {
             Some(Box::new(decode_dir(r, depth + 1)?))
         } else {
             None
@@ -674,7 +711,7 @@ fn decode_dir(r: &mut Reader, depth: usize) -> Option<Dir> {
     }
     // The order on disk may come from any sort, so mark it as stale.
     Some(Dir {
-        names,
+        names: names.to_vec(),
         entries,
         sort: None,
         id,
@@ -687,12 +724,12 @@ struct Reader<'a> {
     pos: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
     fn remaining(&self) -> usize {
         self.bytes.len() - self.pos
     }
 
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let slice = self.bytes.get(self.pos..self.pos.checked_add(n)?)?;
         self.pos += n;
         Some(slice)
@@ -721,7 +758,8 @@ impl Reader<'_> {
     }
 }
 
-pub fn load(root: &Path) -> Option<(Header, Dir)> {
+#[cfg(test)]
+fn load(root: &Path) -> Option<(Header, Dir)> {
     decode(&fs::read(file_for(root)?).ok()?)
 }
 
