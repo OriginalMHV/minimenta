@@ -143,41 +143,30 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     list(path, opts, progress, &meta, &AtomicBool::new(false))
 }
 
-/// Starts the MFT reader and the directory listing at the same time and
-/// keeps the result that finishes first. The MFT reader must read the table
-/// of the whole volume (about 3 s for a 1.3 GB table), so a listing wins for
-/// small or warm folders, and the MFT wins on a cold disk, where a listing
-/// waits for thousands of small reads.
-/// The MFT reader starts only after this delay, and only while the listing
-/// is slower than `MFT_START_RATE`. On the Windows runner, a warm listing of
-/// `C:\Program Files` ran at about 460,000 items/s and a cold one at about
-/// 18,000 items/s. Starting the reader on a warm disk costs about 20%, and
-/// not starting it on a cold disk costs 3x to 5x, so the threshold leans
-/// towards starting.
+/// The MFT reader starts only while the listing has listed fewer than
+/// `MFT_START_RATE` items per second over the last `MFT_WINDOW`. On the
+/// Windows runner, a warm listing of `C:\Program Files` ran at about 460,000
+/// items/s and a cold one at about 18,000 items/s. Starting the reader on a
+/// warm disk costs about 20%, and not starting it on a cold disk costs 3x to
+/// 5x, so the threshold leans towards starting.
 #[cfg(windows)]
-const MFT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(windows)]
 const MFT_START_RATE: f64 = 150_000.0;
 
+/// Starts the MFT reader next to the directory listing and keeps the result
+/// that finishes first. The MFT reader must read the table of the whole
+/// volume (about 3 s for a 1.3 GB table), so a listing wins for small or warm
+/// folders, and the MFT wins on a cold disk, where a listing waits for
+/// thousands of small reads.
 #[cfg(windows)]
 fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
     let stop_listing = AtomicBool::new(false);
     let mft_progress = Progress::default();
     std::thread::scope(|s| {
         let reader = s.spawn(|| {
-            // Small or warm folders finish, or list fast enough, before the
-            // reader starts, so they pay nothing for the race.
-            let started = std::time::Instant::now();
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-                if mft_progress.cancel.load(Relaxed) {
-                    return Ok(None);
-                }
-                let elapsed = started.elapsed();
-                let rate = progress.items.load(Relaxed) as f64 / elapsed.as_secs_f64();
-                if elapsed >= MFT_DELAY && rate < MFT_START_RATE {
-                    break;
-                }
+            if !wait_for_slow_listing(progress, &mft_progress.cancel) {
+                return Ok(None);
             }
             let result = mft::scan(path, opts.threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {
@@ -185,6 +174,7 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
             }
             result
         });
+        let waiting = reader.thread().clone();
         let listed = list(path, opts, progress, meta, &stop_listing);
         if stop_listing.load(Relaxed)
             && let Ok(Ok(Some(mut dir))) = reader.join()
@@ -196,10 +186,48 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
             dir.sort(Sort::default());
             return Ok(dir);
         }
-        // The listing finished first, or the MFT reader could not run.
+        // The listing finished first, or the MFT reader could not run. Wake
+        // the reader if it waits, so the scope does not wait for it.
         mft_progress.cancel.store(true, Relaxed);
+        waiting.unpark();
         listed
     })
+}
+
+/// Waits until the listing is slow, and returns false when `done` is set
+/// first. Small or warm folders finish, or list fast enough, so they pay
+/// nothing for the race.
+#[cfg(windows)]
+fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
+    let gate = std::env::var("MINIMENTA_MFT_GATE").unwrap_or_default();
+    let started = std::time::Instant::now();
+    let mut last = (started, 0);
+    loop {
+        std::thread::park_timeout(MFT_WINDOW);
+        if done.load(Relaxed) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if now - last.0 < MFT_WINDOW {
+            continue;
+        }
+        let items = progress.items.load(Relaxed);
+        let (since, from) = match gate.as_str() {
+            "average" => (started, 0),
+            _ => last,
+        };
+        let rate = (items - from) as f64 / (now - since).as_secs_f64();
+        if gate == "none" || rate < MFT_START_RATE {
+            if std::env::var_os("MINIMENTA_PROFILE").is_some() {
+                eprintln!(
+                    "race: reader started after {} ms, {items} items listed, {rate:.0} items/s",
+                    (now - started).as_millis()
+                );
+            }
+            return true;
+        }
+        last = (now, items);
+    }
 }
 
 fn list(
