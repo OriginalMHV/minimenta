@@ -19,13 +19,20 @@ pub mod flag {
     /// A mount point that `--one-file-system` skipped.
     pub const OTHER_FS: u8 = 8;
     pub const SELECTED: u8 = 16;
+    /// Set during an incremental update on entries whose totals must be recomputed.
+    pub const DIRTY: u8 = 32;
+    /// A file with more than one hard link. The cache lists its directory again
+    /// on every load, so all links are counted once in the same pass.
+    pub const MULTI_LINK: u8 = 64;
+    /// The flags worth keeping in the cache file.
+    pub const PERSISTENT: u8 = ERROR | SUB_ERROR | HARDLINK | OTHER_FS | MULTI_LINK;
 }
 
 /// Names live in the parent's `Dir::names` buffer, so a scan allocates once
 /// per directory instead of once per file.
 pub struct Entry {
-    name_start: u32,
-    name_len: u32,
+    pub(crate) name_start: u32,
+    pub(crate) name_len: u32,
     pub disk: u64,
     pub apparent: u64,
     pub items: u64,
@@ -89,6 +96,9 @@ pub struct Dir {
     /// The blocks of the directory itself, in bytes. `du` counts them on
     /// Linux. The macOS scanner leaves them at 0.
     pub own_disk: u64,
+    /// The inode of this directory, or 0 when unknown. An incremental update
+    /// reuses a cached subtree only when the name and the inode both match.
+    pub id: u64,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -117,6 +127,10 @@ impl Dir {
             flags,
             dir: None,
         });
+    }
+
+    pub fn find(&self, name: &[u8]) -> Option<usize> {
+        self.entries.iter().position(|e| self.name(e) == name)
     }
 
     /// The sizes of the entries plus the blocks of the directory itself.

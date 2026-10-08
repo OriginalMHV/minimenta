@@ -13,11 +13,12 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use super::{display_path, view};
-use crate::scan::{self, Options, Progress};
-use crate::tree::{Dir, format_size};
+use crate::cache::{self, Scan};
+use crate::scan::{Options, Progress};
+use crate::tree::format_size;
 
 pub enum Outcome {
-    Done(Dir),
+    Done(Box<Scan>),
     Cancelled,
     Quit,
     Failed(io::Error),
@@ -32,14 +33,14 @@ pub fn scan(terminal: &mut DefaultTerminal, path: &Path, opts: Options) -> io::R
         let progress = Arc::clone(&progress);
         let path = path.to_path_buf();
         thread::spawn(move || {
-            let _ = tx.send(scan::scan(&path, &opts, &progress));
+            let _ = tx.send(cache::scan(&path, &opts, &progress));
         });
     }
     let start = Instant::now();
     let mut quit = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(dir)) => return Ok(Outcome::Done(dir)),
+            Ok(Ok(scan)) => return Ok(Outcome::Done(Box::new(scan))),
             Ok(Err(_)) if progress.cancel.load(Relaxed) => {
                 return Ok(if quit {
                     Outcome::Quit

@@ -11,7 +11,7 @@ use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
 
-use super::Ctx;
+use super::{Ctx, SubDir};
 use crate::tree::{Dir, Kind, flag};
 
 // u64 words keep the buffer 8-byte aligned for `linux_dirent64`.
@@ -38,7 +38,7 @@ pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
     dir: &mut Dir,
-    subdirs: &mut Vec<(usize, u32)>,
+    subdirs: &mut Vec<SubDir>,
     _expected: u32,
 ) -> io::Result<()> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -86,13 +86,7 @@ pub(super) fn read_dir(
     })
 }
 
-fn add_entry(
-    ctx: &Ctx,
-    fd: libc::c_int,
-    name: &CStr,
-    dir: &mut Dir,
-    subdirs: &mut Vec<(usize, u32)>,
-) {
+fn add_entry(ctx: &Ctx, fd: libc::c_int, name: &CStr, dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
     let mut st = MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
         libc::fstatat(
@@ -115,7 +109,11 @@ fn add_entry(
             if ctx.one_fs && st.st_dev != ctx.root_dev {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
-                subdirs.push((dir.entries.len(), 0));
+                subdirs.push(SubDir {
+                    index: dir.entries.len(),
+                    expected: 0,
+                    ino: st.st_ino,
+                });
                 dir.push(name, Kind::Dir, disk, 0, 0);
             }
             return;
@@ -124,8 +122,13 @@ fn add_entry(
         libc::S_IFLNK => Kind::Symlink,
         _ => Kind::Other,
     };
-    let shared = st.st_nlink > 1 && !ctx.first_link(st.st_dev, st.st_ino);
-    let flags = if shared { flag::HARDLINK } else { 0 };
+    let mut flags = 0;
+    if st.st_nlink > 1 {
+        flags |= flag::MULTI_LINK;
+        if !ctx.first_link(st.st_dev, st.st_ino) {
+            flags |= flag::HARDLINK;
+        }
+    }
     dir.push(name, kind, disk, st.st_size.max(0) as u64, flags);
 }
 
@@ -154,6 +157,7 @@ mod tests {
         Options {
             one_fs: true,
             threads,
+            cache: false,
         }
     }
 

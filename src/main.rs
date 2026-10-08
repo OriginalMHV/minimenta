@@ -1,3 +1,8 @@
+// Loading and updating a cache needs FSEvents, so only macOS uses most of it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod cache;
+#[cfg(target_os = "macos")]
+mod fsevents;
 mod scan;
 mod tree;
 mod ui;
@@ -6,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use cache::Source;
 use scan::{Options, Progress};
 use tree::format_size;
 
@@ -16,9 +22,15 @@ Usage: minimenta [OPTIONS] [DIR]
 
 Without DIR, minimenta asks which directory to scan.
 
+On macOS, minimenta keeps the last scan of each directory in
+~/Library/Caches/minimenta. The next run lists again only the
+directories that FSEvents reports as changed. Press r to rescan.
+
 Options:
   -x, --one-file-system  Do not cross file system boundaries
   -t, --threads N        Number of scan threads (default: CPU count)
+      --no-cache         Always scan everything, and do not read or write the cache
+      --cache            Use the cache with --summary too (it scans fully by default)
       --summary          Scan, print the totals, and exit
   -h, --help             Print this help
   -V, --version          Print the version";
@@ -35,14 +47,18 @@ fn parse_args() -> Result<Args, String> {
         opts: Options {
             one_fs: false,
             threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
+            cache: true,
         },
         summary: false,
     };
+    let mut cache_in_summary = false;
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         match arg.to_str() {
             Some("-x" | "--one-file-system") => args.opts.one_fs = true,
             Some("--summary") => args.summary = true,
+            Some("--no-cache") => args.opts.cache = false,
+            Some("--cache") => cache_in_summary = true,
             Some("-t" | "--threads") => {
                 let n = it.next().and_then(|v| v.to_str()?.parse::<usize>().ok());
                 args.opts.threads = n
@@ -64,6 +80,10 @@ fn parse_args() -> Result<Args, String> {
             _ => return Err("only one directory can be scanned".into()),
         }
     }
+    // Scripts and benchmarks expect a full scan unless they ask for the cache.
+    if args.summary && !cache_in_summary {
+        args.opts.cache = false;
+    }
     Ok(args)
 }
 
@@ -75,27 +95,37 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if args.summary {
-        return summary(args);
-    }
-    match ui::run(args.dir, args.opts) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("minimenta: {e}");
-            ExitCode::FAILURE
+    let code = if args.summary {
+        summary(args)
+    } else {
+        match ui::run(args.dir, args.opts) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("minimenta: {e}");
+                ExitCode::FAILURE
+            }
         }
-    }
+    };
+    cache::flush();
+    code
 }
 
 fn summary(args: Args) -> ExitCode {
     let dir = args.dir.unwrap_or_else(|| PathBuf::from("."));
     let start = Instant::now();
     let progress = Progress::default();
-    match scan::scan(&dir, &args.opts, &progress) {
-        Ok(tree) => {
+    match cache::scan(&dir, &args.opts, &progress) {
+        Ok(scan) => {
+            let tree = scan.dir;
             let t = tree.totals();
+            let from = match scan.source {
+                Source::Scanned => "full scan".to_string(),
+                Source::Cached { listed, .. } => {
+                    format!("cache, {listed} directories listed again")
+                }
+            };
             println!(
-                "{}  disk, {}  apparent, {} items, {} errors in {:.3} s  {}",
+                "{}  disk, {}  apparent, {} items, {} errors in {:.3} s ({from})  {}",
                 format_size(t.disk).trim_start(),
                 format_size(t.apparent).trim_start(),
                 t.items,

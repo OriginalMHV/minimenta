@@ -4,14 +4,14 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
-use super::{Ctx, as_path};
+use super::{Ctx, SubDir, as_path};
 use crate::tree::{Dir, Kind, flag};
 
 pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
     dir: &mut Dir,
-    subdirs: &mut Vec<(usize, u32)>,
+    subdirs: &mut Vec<SubDir>,
     _expected: u32,
 ) -> io::Result<()> {
     for entry in fs::read_dir(as_path(path))? {
@@ -28,7 +28,11 @@ pub(super) fn read_dir(
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
                 // A directory counts its own blocks but no apparent size, as `du` does.
-                subdirs.push((dir.entries.len(), 0));
+                subdirs.push(SubDir {
+                    index: dir.entries.len(),
+                    expected: 0,
+                    ino: meta.ino(),
+                });
                 dir.push(name, Kind::Dir, meta.blocks() * 512, 0, 0);
             }
             continue;
@@ -40,8 +44,13 @@ pub(super) fn read_dir(
         } else {
             Kind::Other
         };
-        let shared = meta.nlink() > 1 && !ctx.first_link(meta.dev(), meta.ino());
-        let flags = if shared { flag::HARDLINK } else { 0 };
+        let mut flags = 0;
+        if meta.nlink() > 1 {
+            flags |= flag::MULTI_LINK;
+            if !ctx.first_link(meta.dev(), meta.ino()) {
+                flags |= flag::HARDLINK;
+            }
+        }
         dir.push(name, kind, meta.blocks() * 512, meta.len(), flags);
     }
     Ok(())
