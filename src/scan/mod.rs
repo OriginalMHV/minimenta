@@ -158,7 +158,9 @@ const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(windows)]
 const MFT_START_RATE: f64 = 150_000.0;
 /// A listing slower than `MFT_EARLY_RATE` over its first `MFT_EARLY` is
-/// clearly cold, so the reader starts without waiting for a full window.
+/// clearly cold, so the reader starts without waiting for a full window. On
+/// the runner, cold listings of `C:\Program Files` had 600 to 1,400 items
+/// after 50 ms, and warm ones about 36,000 after 70 ms.
 #[cfg(windows)]
 const MFT_EARLY: std::time::Duration = std::time::Duration::from_millis(50);
 #[cfg(windows)]
@@ -728,6 +730,39 @@ mod tests {
         assert_eq!(via_link.totals(), direct.totals());
         assert_eq!(via_link.totals().apparent, 3000);
         assert_eq!(via_link.totals().items, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stalled_listing_starts_the_mft_reader_after_the_early_window() {
+        let start = std::time::Instant::now();
+        assert!(wait_for_slow_listing(
+            &Progress::default(),
+            &AtomicBool::new(false)
+        ));
+        assert!(start.elapsed() < MFT_WINDOW);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_fast_or_finished_listing_never_starts_the_mft_reader() {
+        assert!(!wait_for_slow_listing(
+            &Progress::default(),
+            &AtomicBool::new(true)
+        ));
+        let progress = Progress::default();
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                // About 2,000,000 items/s, far above both thresholds.
+                for _ in 0..100 {
+                    progress.items.fetch_add(10_000, Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                done.store(true, Relaxed);
+            });
+            assert!(!wait_for_slow_listing(&progress, &done));
+        });
     }
 
     #[test]
