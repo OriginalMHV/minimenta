@@ -12,10 +12,12 @@ updates:
       - "dependencies"
     open-pull-requests-limit: 10
 
-  # dist generates release.yml. A pull request that changes it fails the plan
-  # check on purpose. Close it and update cargo-dist instead (RELEASING.md).
+  # dist generates release.yml, and the plan check fails when someone edits it.
+  # Dependabot skips it. Update its actions through cargo-dist (RELEASING.md).
   - package-ecosystem: "github-actions"
     directory: "/"
+    exclude-paths:
+      - ".github/workflows/release.yml"
     schedule:
       interval: "weekly"
       day: "monday"
