@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/OriginalMHV/minimenta/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OriginalMHV/minimenta/ci.yml?branch=main&style=flat-square&labelColor=59636E&color=1A7F5A&label=CI" alt="CI status"></a>
+  <a href="https://crates.io/crates/minimenta"><img src="https://img.shields.io/crates/v/minimenta?style=flat-square&labelColor=59636E&color=1A7F5A" alt="Version on crates.io"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-2024%20edition-1A7F5A?style=flat-square&labelColor=59636E" alt="Rust 2024 edition"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-1A7F5A?style=flat-square&labelColor=59636E" alt="Runs on macOS, Linux and Windows">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-1A7F5A?style=flat-square&labelColor=59636E" alt="MIT or Apache-2.0 license"></a>
@@ -28,11 +29,25 @@ minimenta is an interactive disk usage analyzer for the terminal, written in Rus
 
 ## Install
 
+minimenta runs on macOS, Linux and Windows. Each method installs two commands: `minimenta` and its short name `mm`.
+
 ```sh
-cargo install --git https://github.com/OriginalMHV/minimenta
+# Homebrew (macOS and Linux)
+brew install OriginalMHV/tap/minimenta
+
+# crates.io
+cargo install minimenta
+
+# Shell installer (macOS and Linux)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.sh | sh
+
+# PowerShell installer (Windows)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.ps1 | iex"
 ```
 
-This installs two commands: `minimenta` and its short name `mm`. minimenta runs on macOS, Linux and Windows. Building it needs a recent stable Rust toolchain and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`.
+You can also download an archive for your system from the [releases page](https://github.com/OriginalMHV/minimenta/releases). Each archive holds both commands.
+
+`cargo install` needs Rust 1.88 or newer and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`. To install the latest commit instead of a release, run `cargo install --git https://github.com/OriginalMHV/minimenta`.
 
 ## Usage
 
