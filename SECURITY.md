@@ -12,6 +12,8 @@ Use a private report on GitHub:
 
 <https://github.com/OriginalMHV/minimenta/security/advisories/new>
 
+If the form does not open, open a public issue that asks for a private contact. Do not put details of the problem in that issue.
+
 Include this information:
 
 1. What happens, and what an attacker can do.
@@ -34,7 +36,7 @@ These actions need care:
 1. **It deletes and moves files.** The `d` key moves the selected items to the Trash. The `D` key deletes them for good. Both keys ask for confirmation first. On macOS, minimenta asks Finder to move the items, and it uses the file manager API when Finder is not available. On Linux and Windows, it uses the `trash` crate.
 2. **It acts with the rights of the user.** If you start minimenta as root or as an administrator, `d` and `D` can move or delete any file that this account can change. Start minimenta as a normal user when you want to remove files.
 3. **It reads the NTFS master file table as administrator (Windows).** minimenta opens the NTFS volume for reading. It reads the master file table in large blocks. It never writes to the volume. The `--no-mft` option turns this off. Without administrator rights, minimenta lists directories the normal way.
-4. **It keeps a cache (macOS).** minimenta stores the names and sizes of the folders that you scanned in `~/Library/Caches/minimenta`. It sets no special permissions on these files. minimenta does not use the cache when it runs as root. The `--no-cache` option turns the cache off.
+4. **It keeps a cache (macOS).** minimenta stores the path of each folder that you scanned in `~/Library/Caches/minimenta`. It also stores the paths of the mounted volumes below that folder, and the name, size and item count of every file and folder below it. The file mode comes from the umask, because minimenta sets no special permissions. minimenta does not use the cache when it runs as root. The `--no-cache` option turns the cache off.
 
 ## What Counts as a Security Issue
 

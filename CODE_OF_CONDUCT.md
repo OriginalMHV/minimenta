@@ -36,7 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at GitHub's private reporting form, <https://github.com/OriginalMHV/minimenta/security/advisories/new>, the same private path that [SECURITY.md](SECURITY.md) describes. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at GitHub's private reporting form, <https://github.com/OriginalMHV/minimenta/security/advisories/new>. This is the same form that [SECURITY.md](SECURITY.md) describes. Start the title of a conduct report with "Conduct report", so that it is not read as a security report. If the form does not open, open a public issue that asks for a private contact. Do not put details of the incident in that issue. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

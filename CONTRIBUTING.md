@@ -42,9 +42,10 @@ cargo test
 
 The two commands with `--target` check the Linux and Windows code on any machine. Without them, clippy skips the code for the other systems. If a target is missing, run `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc`. The option `--no-default-features` leaves out mimalloc, so these checks need no C cross compiler.
 
-CI runs `cargo fmt`, clippy and the tests on macOS, Linux and Windows. It also runs these jobs:
+CI runs `cargo fmt`, clippy and the tests on macOS, Linux and Windows. It does not run the two commands with `--target`, so run them yourself. CI also runs these jobs:
 
 - **MSRV** builds with the Rust version in `rust-version` in `Cargo.toml`. Do not use a newer language or library feature unless you raise `rust-version` in the same pull request.
+- **Package** runs `cargo publish --dry-run --locked` on Linux. It also builds the documentation with `--no-default-features`, as docs.rs does.
 - **cargo-deny** checks advisories, licenses, and sources. `deny.toml` lists the allowed licenses. Run `cargo deny check` locally if you add or update a dependency.
 - **CodeQL** scans the Rust code and the workflow files.
 
@@ -99,7 +100,11 @@ The CI benchmark jobs run on GitHub runners without endpoint security. Use them 
 
 ## Releases
 
-Maintainers follow [RELEASING.md](RELEASING.md). [cargo-dist](https://axodotdev.github.io/cargo-dist/) generates `.github/workflows/release.yml`. Do not edit that file by hand. Dependabot may open a pull request that changes it. That pull request fails the release plan check on purpose. Close it and update cargo-dist instead.
+Maintainers follow [RELEASING.md](RELEASING.md). [cargo-dist](https://axodotdev.github.io/cargo-dist/) generates `.github/workflows/release.yml`. Do not edit that file by hand. The release plan check fails when the file differs from the dist configuration. Dependabot skips the file, so update its actions through cargo-dist.
+
+## License
+
+minimenta is dual licensed as MIT OR Apache-2.0. Unless you state otherwise, any contribution that you intentionally submit for inclusion in minimenta, as defined in the Apache-2.0 license, is dual licensed as MIT OR Apache-2.0, without any additional terms or conditions.
 
 ## Questions
 
