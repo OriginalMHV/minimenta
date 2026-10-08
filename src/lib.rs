@@ -1,5 +1,11 @@
-//! minimenta: an interactive disk usage analyzer. The binaries `minimenta`
-//! and its short name `mm` both call [`main`].
+//! minimenta: an interactive disk usage analyzer for the terminal. It runs on
+//! macOS, Linux and Windows.
+//!
+//! This crate is a program, not a library. The binaries `minimenta` and its
+//! short name `mm` both call [`main`]. Install it with
+//! `cargo install --locked minimenta`. The
+//! [README](https://github.com/OriginalMHV/minimenta#readme) explains the keys
+//! and shows the speed results.
 
 // Loading and updating a cache needs FSEvents, so only macOS uses most of it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
