@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# An explicit bash shell runs with -eo pipefail, so `cmd | tee` fails when cmd fails.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   check:
     strategy:
@@ -58,6 +63,7 @@ jobs:
           NCDU="$RUNNER_TEMP/ncdu" bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y -qq liburing-dev
           cc -O2 -o "$RUNNER_TEMP/syscalls_linux" bench/syscalls_linux.c -luring
           "$RUNNER_TEMP/syscalls_linux" "$RUNNER_TEMP/bench-tree" "$(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
