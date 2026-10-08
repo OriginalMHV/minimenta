@@ -1,6 +1,4 @@
-use std::ffi::OsStr;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use ratatui::DefaultTerminal;
@@ -10,7 +8,7 @@ use super::progress::{self, Outcome};
 use super::{trash, view};
 use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
-use crate::tree::{Dir, Sort, SortKey, Tree, flag};
+use crate::tree::{Dir, Sort, SortKey, Tree, flag, os_name};
 
 pub enum Mode {
     Browse,
@@ -118,7 +116,7 @@ impl Browser {
         let mut dir = &*self.tree.dir;
         for &i in &self.stack {
             let e = &dir.entries[i];
-            path.push(OsStr::from_bytes(dir.name(e)));
+            path.push(os_name(dir.name(e)));
             dir = e.dir.as_ref().expect("stack points to a directory");
         }
         path
@@ -313,7 +311,7 @@ impl Browser {
             let dir = self.dir();
             targets
                 .iter()
-                .map(|&i| base.join(OsStr::from_bytes(dir.name(&dir.entries[i]))))
+                .map(|&i| base.join(os_name(dir.name(&dir.entries[i]))))
                 .collect()
         };
         let verb = if permanent {

@@ -34,8 +34,8 @@ impl Prompt {
 
     pub fn set_path(&mut self, path: &Path) {
         let mut text = display_path(path);
-        if !text.ends_with('/') {
-            text.push('/');
+        if !text.ends_with(is_separator) {
+            text.push(std::path::MAIN_SEPARATOR);
         }
         self.input = text.chars().collect();
         self.cursor = self.input.len();
@@ -139,7 +139,7 @@ impl Prompt {
     /// Completes the last path component from the directories that exist.
     fn complete(&mut self) {
         let text = self.text();
-        let split = text.rfind('/').map_or(0, |i| i + 1);
+        let split = text.rfind(is_separator).map_or(0, |i| i + 1);
         let (parent, prefix) = text.split_at(split);
         let lookup = if parent.is_empty() {
             PathBuf::from(".")
@@ -244,13 +244,17 @@ fn common_len(a: &str, b: &str) -> usize {
 }
 
 fn expand_home(text: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match (text.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            home.join(rest.trim_start_matches('/'))
+    match (text.strip_prefix('~'), std::env::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(is_separator) => {
+            home.join(rest.trim_start_matches(is_separator))
         }
         _ => PathBuf::from(text),
     }
+}
+
+/// Windows accepts both `\` and `/`, Unix only `/`.
+fn is_separator(c: char) -> bool {
+    c == '/' || (cfg!(windows) && c == '\\')
 }
 
 #[cfg(test)]
@@ -299,7 +303,7 @@ mod tests {
 
     #[test]
     fn tilde_expands_to_home() {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = std::env::home_dir().unwrap();
         assert_eq!(expand_home("~"), home);
         assert_eq!(expand_home("~/x"), home.join("x"));
         assert_eq!(expand_home("~x"), PathBuf::from("~x"));

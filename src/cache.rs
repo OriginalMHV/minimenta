@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -204,7 +203,7 @@ fn refresh_dirs(dir: &Dir, path: &Path, out: &mut Vec<(PathBuf, bool)>) {
     let mut relist = false;
     for e in &dir.entries {
         if e.kind == Kind::Dir {
-            let child = path.join(std::ffi::OsStr::from_bytes(dir.name(e)));
+            let child = path.join(crate::tree::os_name(dir.name(e)));
             if e.has(flag::ERROR) {
                 out.push((child, true));
             } else if let Some(sub) = &e.dir {
@@ -300,14 +299,28 @@ fn mount_changes(before: &[Mount], now: &[Mount], one_fs: bool) -> Vec<(PathBuf,
 
 /// Running as root (for example with `sudo -E`) would create root-owned cache
 /// files in the user's home folder and block later saves.
+#[cfg(target_os = "macos")]
 fn cache_allowed() -> bool {
-    cfg!(target_os = "macos") && unsafe { libc::geteuid() } != 0
+    let uid = unsafe { libc::geteuid() };
+    uid != 0
 }
 
+/// The cache needs FSEvents, which only macOS has.
+#[cfg(not(target_os = "macos"))]
+fn cache_allowed() -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(path).ok()?;
     Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(_: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 fn new_header(
@@ -373,7 +386,7 @@ fn mounts_under(root: &Path) -> Vec<Mount> {
         .filter_map(|fs| {
             // SAFETY: f_mntonname is a NUL-terminated C string written by the kernel.
             let name = unsafe { std::ffi::CStr::from_ptr(fs.f_mntonname.as_ptr()) };
-            let path = PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()));
+            let path = PathBuf::from(crate::tree::os_name(name.to_bytes()));
             // SAFETY: fsid_t is two 32-bit integers with a private field.
             let fsid: [u32; 2] = unsafe { std::mem::transmute_copy(&fs.f_fsid) };
             (path != root && path.starts_with(root)).then(|| Mount {
@@ -431,7 +444,7 @@ pub struct Header {
 
 fn path_hash(root: &Path) -> u64 {
     root.as_os_str()
-        .as_bytes()
+        .as_encoded_bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
             (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
@@ -440,8 +453,8 @@ fn path_hash(root: &Path) -> u64 {
 
 /// `~/Library/Caches/minimenta/<hash of the root path>.bin`
 pub fn file_for(root: &Path) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(format!(
+    let home = std::env::home_dir()?;
+    Some(home.join(format!(
         "Library/Caches/minimenta/{:016x}.bin",
         path_hash(root)
     )))
@@ -456,14 +469,14 @@ pub fn encode(header: &Header, dir: &Dir) -> Vec<u8> {
     let mut out = Vec::with_capacity(128 + dir.names.len() + dir.entries.len() * 40);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
-    put_bytes(&mut out, header.root.as_os_str().as_bytes());
+    put_bytes(&mut out, header.root.as_os_str().as_encoded_bytes());
     out.extend_from_slice(&header.root_dev.to_le_bytes());
     out.extend_from_slice(&header.root_ino.to_le_bytes());
     out.push(u8::from(header.one_fs));
     out.extend_from_slice(&header.volume);
     out.extend_from_slice(&(header.mounts.len() as u32).to_le_bytes());
     for m in &header.mounts {
-        put_bytes(&mut out, m.path.as_os_str().as_bytes());
+        put_bytes(&mut out, m.path.as_os_str().as_encoded_bytes());
         out.push(u8::from(m.volume.is_some()));
         out.extend_from_slice(&m.volume.unwrap_or_default());
         out.extend_from_slice(&m.fsid.to_le_bytes());
@@ -538,8 +551,14 @@ pub fn decode(bytes: &[u8]) -> Option<(Header, Dir)> {
 }
 
 /// A valid single path component: not empty, no `/`, no NUL, not `.` or `..`.
+/// Outside Unix the name must also be UTF-8, because there not every byte
+/// string is a valid `OsStr`.
 fn valid_name(name: &[u8]) -> bool {
-    !name.is_empty() && name != b"." && name != b".." && !name.iter().any(|&b| b == b'/' || b == 0)
+    !name.is_empty()
+        && name != b"."
+        && name != b".."
+        && !name.iter().any(|&b| b == b'/' || b == 0)
+        && (cfg!(unix) || std::str::from_utf8(name).is_ok())
 }
 
 fn decode_dir(r: &mut Reader, depth: usize) -> Option<Dir> {
@@ -627,7 +646,12 @@ impl Reader<'_> {
 
     fn path(&mut self) -> Option<PathBuf> {
         let len = self.u32()? as usize;
-        Some(PathBuf::from(std::ffi::OsStr::from_bytes(self.take(len)?)))
+        let bytes = self.take(len)?;
+        if cfg!(unix) {
+            Some(PathBuf::from(crate::tree::os_name(bytes)))
+        } else {
+            Some(PathBuf::from(std::str::from_utf8(bytes).ok()?))
+        }
     }
 }
 
