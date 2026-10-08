@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compares cold-cache scans on Linux, where the disk is the bottleneck.
-# Needs sudo to drop the page cache before every run.
+# Compares cold-cache scans, where the disk is the bottleneck. Drops the file
+# cache before every run (purge on macOS, drop_caches on Linux). Needs sudo.
 # Usage: bench/cold.sh [TREE] [PAIRS]
 set -euo pipefail
 
@@ -8,7 +8,11 @@ tree=${1:-/usr}
 pairs=${2:-3}
 bin=./target/release/minimenta
 ncdu=${NCDU:-ncdu}
-drop="sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null"
+if [ "$(uname)" = Darwin ]; then
+  drop="sync; sudo purge"
+else
+  drop="sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null"
+fi
 cargo build --release -q
 
 echo "-- cold: A = minimenta (default threads), B = ncdu -t 64 (its fastest cold setting)"
