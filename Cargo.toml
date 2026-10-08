@@ -37,3 +37,14 @@ panic = "abort"
 # all three CI platforms. Build with --no-default-features to leave it out.
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Sizes, counts and offsets from the file system and the kernel fit the
+# target types. Where a value can be out of range, the code uses try_from.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# Pairs such as name_start and name_len are clear in context.
+similar_names = "allow"

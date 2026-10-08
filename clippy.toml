@@ -1,0 +1,2 @@
+# Product names in doc comments, not code. ".." keeps the default list.
+doc-valid-idents = ["FSEvents", "CoreServices", "AppleScript", ".."]

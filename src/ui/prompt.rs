@@ -163,7 +163,7 @@ impl Prompt {
             [] => return,
             [only] => format!("{parent}{only}/"),
             [first, rest @ ..] => {
-                self.candidates = matches.clone();
+                self.candidates.clone_from(&matches);
                 let common = rest
                     .iter()
                     .map(|name| common_len(first, name))

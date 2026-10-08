@@ -8,7 +8,7 @@ use super::progress::{self, Outcome};
 use super::{trash, view};
 use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
-use crate::tree::{Dir, Sort, SortKey, Tree, flag, os_name};
+use crate::tree::{Dir, Entry, Sort, SortKey, Tree, flag, os_name};
 
 pub enum Mode {
     Browse,
@@ -60,7 +60,7 @@ pub fn run(
     terminal: &mut DefaultTerminal,
     tree: Tree,
     opts: Options,
-    source: Source,
+    source: &Source,
     session: Option<Header>,
 ) -> io::Result<()> {
     let mut browser = Browser {
@@ -70,7 +70,7 @@ pub fn run(
         offset: 0,
         sort: Sort::default(),
         mode: Mode::Browse,
-        message: describe(&source),
+        message: describe(source),
         list_height: 1,
         range: None,
         opts,
@@ -84,7 +84,7 @@ pub fn run(
     if browser.changed
         && let Some(session) = browser.session.take()
     {
-        cache::save_in_background(session, &browser.tree.dir);
+        cache::save_in_background(&session, &browser.tree.dir);
     }
     // Freeing millions of nodes takes time and the process ends right after.
     std::mem::forget(browser);
@@ -105,7 +105,7 @@ impl Browser {
                 Action::None => {}
                 Action::Quit => return Ok(()),
                 Action::Delete { permanent, targets } => {
-                    self.delete(terminal, permanent, &targets)?
+                    self.delete(terminal, permanent, &targets)?;
                 }
                 Action::Rescan => self.rescan(terminal)?,
                 Action::Undo => self.undo(terminal)?,
@@ -290,7 +290,7 @@ impl Browser {
         self.range = None;
         let (sort, cursor) = (self.sort, self.cursor);
         let dir = self.tree.dir_at_mut(&self.stack);
-        let id = dir.entries.get(cursor).map(|e| e.id());
+        let id = dir.entries.get(cursor).map(Entry::id);
         dir.sort(sort);
         if let Some(id) = id {
             self.cursor = dir.entries.iter().position(|e| e.id() == id).unwrap_or(0);

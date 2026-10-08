@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -105,8 +107,8 @@ fn row(
     width: usize,
 ) -> Line<'static> {
     let size = e.size(apparent);
-    let filled =
-        ((size as u128 * BAR_WIDTH as u128).div_ceil(largest as u128) as usize).min(BAR_WIDTH);
+    let filled = ((u128::from(size) * BAR_WIDTH as u128).div_ceil(u128::from(largest)) as usize)
+        .min(BAR_WIDTH);
     let filled = if size == 0 { 0 } else { filled };
     let selected = e.has(flag::SELECTED);
     let mark = if selected { '*' } else { ' ' };
@@ -190,10 +192,11 @@ fn footer_line(b: &Browser) -> Line<'static> {
         (n + 1, s + b.dir().entries[i].size(b.sort.apparent))
     });
     if count > 0 {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "   |  {count} selected: {}",
             format_size(size).trim_start()
-        ));
+        );
     }
     let sort = match (b.sort.key, b.sort.apparent) {
         (SortKey::Size, false) => "disk usage",
@@ -201,7 +204,7 @@ fn footer_line(b: &Browser) -> Line<'static> {
         (SortKey::Name, _) => "name",
         (SortKey::Items, _) => "items",
     };
-    text.push_str(&format!("   |  Sorted by {sort}"));
+    let _ = write!(text, "   |  Sorted by {sort}");
     bar(&text)
 }
 

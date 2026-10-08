@@ -74,7 +74,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     let dir = crate::scan::scan(&root, opts, progress)?;
     let session = event_id.and_then(|event_id| {
         let header = new_header(&root, opts, event_id, start.elapsed().as_secs_f64(), mounts)?;
-        save_in_background(header.clone(), &dir);
+        save_in_background(&header, &dir);
         Some(header)
     });
     let source = if progress.mft.load(std::sync::atomic::Ordering::Relaxed) {
@@ -192,7 +192,7 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     // An unchanged tree stays valid with the older position in the file:
     // replaying more history is harmless.
     if changed || stale_file {
-        save_in_background(session.clone(), &dir);
+        save_in_background(&session, &dir);
     }
     Some(Ok(Scan {
         dir,
@@ -297,9 +297,12 @@ fn mount_changes(before: &[Mount], now: &[Mount], one_fs: bool) -> Vec<(PathBuf,
     paths.dedup();
     paths
         .into_iter()
-        .filter_map(|p| match one_fs {
-            true => Some((p.parent()?.to_path_buf(), false)),
-            false => Some((p.clone(), true)),
+        .filter_map(|p| {
+            if one_fs {
+                Some((p.parent()?.to_path_buf(), false))
+            } else {
+                Some((p.clone(), true))
+            }
         })
         .collect()
 }
@@ -671,11 +674,11 @@ static PENDING: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 /// Writes the cache on a background thread. Call [`flush`] before the process
 /// exits. The file is replaced atomically, so a crash never leaves half a file.
 /// A damaged file after a power loss is rejected on load and rebuilt.
-pub fn save_in_background(header: Header, dir: &Dir) {
+pub fn save_in_background(header: &Header, dir: &Dir) {
     let Some(path) = file_for(&header.root) else {
         return;
     };
-    let bytes = encode(&header, dir);
+    let bytes = encode(header, dir);
     let mut pending = PENDING.lock().unwrap();
     if let Some(previous) = pending.take() {
         let _ = previous.join();
@@ -878,14 +881,8 @@ mod tests {
             fsid: 10,
             ..sealed.clone()
         };
-        assert!(
-            mount_changes(
-                std::slice::from_ref(&sealed),
-                std::slice::from_ref(&sealed),
-                false
-            )
-            .is_empty()
-        );
+        let unchanged = std::slice::from_ref(&sealed);
+        assert_eq!(mount_changes(unchanged, unchanged, false), Vec::new());
         assert_eq!(
             mount_changes(&[sealed], &[remounted], false),
             [(PathBuf::from("/r/sealed"), true)]
@@ -1056,7 +1053,7 @@ mod tests {
             flush();
             let (mut header, dir) = load(&f.root).unwrap();
             header.full_scan_at -= MAX_AGE_SECS + 1;
-            save_in_background(header, &dir);
+            save_in_background(&header, &dir);
             flush();
             let run = scan(&f.root, &opts(), &Progress::default()).unwrap();
             flush();
@@ -1171,7 +1168,7 @@ mod tests {
                 ..Dir::default()
             }));
             a.entries[x].flags |= flag::ERROR;
-            save_in_background(header, &dir);
+            save_in_background(&header, &dir);
             flush();
 
             let cached = scan(&f.root, &opts(), &Progress::default()).unwrap();
@@ -1201,6 +1198,16 @@ mod tests {
 
         #[test]
         fn changes_on_a_mounted_disk_image_are_seen() {
+            // Unmounts even when an assertion fails, so no test image stays mounted.
+            struct Mounted(PathBuf);
+            impl Drop for Mounted {
+                fn drop(&mut self) {
+                    let _ = Command::new("hdiutil")
+                        .args(["detach", "-quiet", "-force"])
+                        .arg(&self.0)
+                        .status();
+                }
+            }
             let f = fixture();
             let image = f.tmp.path().join("disk.dmg");
             let created = Command::new("hdiutil")
@@ -1237,16 +1244,6 @@ mod tests {
                     .status();
                 eprintln!("skipped: the disk image keeps no FSEvents history");
                 return;
-            }
-            // Unmounts even when an assertion fails, so no test image stays mounted.
-            struct Mounted(PathBuf);
-            impl Drop for Mounted {
-                fn drop(&mut self) {
-                    let _ = Command::new("hdiutil")
-                        .args(["detach", "-quiet", "-force"])
-                        .arg(&self.0)
-                        .status();
-                }
             }
             let mounted = Mounted(mount.clone());
             let detach = || {

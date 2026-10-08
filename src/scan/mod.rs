@@ -62,6 +62,10 @@ fn native(path: &Path) -> io::Result<NativePath> {
 }
 
 #[cfg(windows)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the Unix version, which can fail"
+)]
 fn native(path: &Path) -> io::Result<NativePath> {
     Ok(path.to_path_buf())
 }
@@ -238,7 +242,7 @@ fn list(
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(meta).1));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, &root, 0, dev_ino(meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -352,9 +356,9 @@ pub fn update(
             // The parent listing holds a directory's own blocks, so keep them.
             let (id, own_disk) = (old.id, old.own_disk);
             let (mut fresh, result) = if *recursive {
-                scan_dir(&ctx, path, 0, id)
+                scan_dir(&ctx, &path, 0, id)
             } else {
-                relist(&ctx, path, old)
+                relist(&ctx, &path, old)
             };
             fresh.own_disk = own_disk;
             *target = fresh;
@@ -419,13 +423,13 @@ fn locate<'d>(dir: &'d mut Dir, components: &[&[u8]]) -> Option<(&'d mut Dir, Op
 /// and the inode match and it was readable last time. Anything else, such as
 /// a directory replaced by another one with the same name, is scanned fully.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn relist(ctx: &Ctx, path: NativePath, mut old: Dir) -> (Dir, io::Result<()>) {
+fn relist(ctx: &Ctx, path: &NativePath, mut old: Dir) -> (Dir, io::Result<()>) {
     let mut fresh = Dir {
         id: old.id,
         ..Dir::default()
     };
     let mut subdirs = Vec::new();
-    let result = platform::read_dir(ctx, &path, &mut fresh, &mut subdirs, 0);
+    let result = platform::read_dir(ctx, path, &mut fresh, &mut subdirs, 0);
     ctx.progress
         .items
         .fetch_add(fresh.entries.len() as u64, Relaxed);
@@ -461,7 +465,7 @@ fn relist(ctx: &Ctx, path: NativePath, mut old: Dir) -> (Dir, io::Result<()>) {
         .par_iter()
         .map(|sub| {
             let name = fresh.name(&fresh.entries[sub.index]);
-            scan_dir(ctx, child_path(&path, name), sub.expected, sub.ino)
+            scan_dir(ctx, &child_path(path, name), sub.expected, sub.ino)
         })
         .collect();
     for (sub, (mut tree, result)) in new_subdirs.iter().zip(scanned) {
@@ -503,7 +507,7 @@ fn fix_totals(dir: &mut Dir) {
 
 /// `expected` is the entry count from the parent listing, or 0 when unknown.
 /// `id` is the inode of the directory, or 0 when unknown.
-fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Result<()>) {
+fn scan_dir(ctx: &Ctx, path: &NativePath, expected: u32, id: u64) -> (Dir, io::Result<()>) {
     let mut dir = Dir {
         id,
         ..Dir::default()
@@ -512,7 +516,7 @@ fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Re
         return (dir, Ok(()));
     }
     let mut subdirs = Vec::new();
-    let result = platform::read_dir(ctx, &path, &mut dir, &mut subdirs, expected);
+    let result = platform::read_dir(ctx, path, &mut dir, &mut subdirs, expected);
     if result.is_err() {
         ctx.progress.errors.fetch_add(1, Relaxed);
     }
@@ -526,7 +530,7 @@ fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Re
             .par_iter()
             .map(|sub| {
                 let name = dir.name(&dir.entries[sub.index]);
-                scan_dir(ctx, child_path(&path, name), sub.expected, sub.ino)
+                scan_dir(ctx, &child_path(path, name), sub.expected, sub.ino)
             })
             .collect();
         for (sub, (mut tree, result)) in subdirs.iter().zip(scanned) {
