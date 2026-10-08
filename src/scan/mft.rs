@@ -6,20 +6,26 @@
 
 use std::fs::File;
 use std::io;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::FileExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
 
 use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevationType,
+    TokenElevationTypeLimited,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GetFileInformationByHandle, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
     GetVolumePathNameW, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::Progress;
 use super::ntfs::{Part, Table, apply_fixups, mft_extents, parse_boot, parse_record};
@@ -160,9 +166,9 @@ fn until_nul(buf: &[u16]) -> &[u16] {
     &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())]
 }
 
-/// Opens the NTFS volume that holds `root` for reading, or returns `None`
-/// when that is not possible, for example without administrator rights.
-fn open_volume(root: &Path) -> Option<File> {
+/// The mount point of the volume that holds `root`, NUL-terminated, when
+/// that volume is NTFS.
+fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
     // The volume functions do not accept the `\\?\` prefix of canonical paths.
     let plain = root
         .to_str()
@@ -171,11 +177,10 @@ fn open_volume(root: &Path) -> Option<File> {
     let root = wide(plain.map_or(root, Path::new));
     let mut mount = [0u16; 1024];
     let mut fs_name = [0u16; 64];
-    let mut volume = [0u16; 64];
     // SAFETY: every buffer is NUL-terminated or has its length passed along.
-    unsafe {
-        if GetVolumePathNameW(root.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) == 0
-            || GetVolumeInformationW(
+    let ok = unsafe {
+        GetVolumePathNameW(root.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) != 0
+            && GetVolumeInformationW(
                 mount.as_ptr(),
                 ptr::null_mut(),
                 0,
@@ -184,16 +189,52 @@ fn open_volume(root: &Path) -> Option<File> {
                 ptr::null_mut(),
                 fs_name.as_mut_ptr(),
                 fs_name.len() as u32,
-            ) == 0
-            || until_nul(&fs_name) != "NTFS".encode_utf16().collect::<Vec<_>>()
-            || GetVolumeNameForVolumeMountPointW(
-                mount.as_ptr(),
-                volume.as_mut_ptr(),
-                volume.len() as u32,
-            ) == 0
-        {
-            return None;
-        }
+            ) != 0
+    };
+    (ok && until_nul(&fs_name) == "NTFS".encode_utf16().collect::<Vec<_>>()).then_some(mount)
+}
+
+/// Whether `root` is on an NTFS volume, whose MFT an administrator can read.
+pub(super) fn on_ntfs(root: &Path) -> bool {
+    ntfs_mount_point(root).is_some()
+}
+
+/// Whether the process runs for an administrator whose token UAC limited.
+/// The same user can start minimenta elevated, and then it reads the MFT.
+pub(super) fn limited_administrator() -> bool {
+    let mut token = ptr::null_mut();
+    // SAFETY: the pseudo handle of the current process needs no closing.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return false;
+    }
+    // SAFETY: the token handle is valid and is closed on drop.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut kind: TOKEN_ELEVATION_TYPE = 0;
+    let mut len = 0;
+    // SAFETY: `kind` is a valid output buffer of the given size.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevationType,
+            (&raw mut kind).cast(),
+            size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &raw mut len,
+        )
+    };
+    ok != 0 && kind == TokenElevationTypeLimited
+}
+
+/// Opens the NTFS volume that holds `root` for reading, or returns `None`
+/// when that is not possible, for example without administrator rights.
+fn open_volume(root: &Path) -> Option<File> {
+    let mount = ntfs_mount_point(root)?;
+    let mut volume = [0u16; 64];
+    // SAFETY: `mount` is NUL-terminated and the length of `volume` is passed.
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), volume.as_mut_ptr(), volume.len() as u32)
+    } == 0
+    {
+        return None;
     }
     // `\\?\Volume{...}\` names the root folder. Without the last backslash it
     // names the volume itself.
@@ -348,6 +389,20 @@ mod tests {
         assert!(
             link_flags.contains(&(crate::tree::flag::MULTI_LINK | crate::tree::flag::HARDLINK))
         );
+    }
+
+    /// Windows needs NTFS for its system volume. A process that can open a
+    /// volume has a full token, so it never shows the hint to run elevated.
+    #[test]
+    fn the_hint_to_run_elevated_needs_ntfs_and_a_limited_token() {
+        let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        assert!(on_ntfs(&system));
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        if open_volume(&root).is_some() {
+            assert!(on_ntfs(&root));
+            assert!(!limited_administrator());
+        }
     }
 
     fn describe_flags(dir: &Dir) -> Vec<u8> {

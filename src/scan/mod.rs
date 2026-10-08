@@ -101,6 +101,9 @@ pub struct Progress {
     pub cancel: AtomicBool,
     /// Set when the scan read the NTFS master file table.
     pub mft: AtomicBool,
+    /// Set when a slow listing could not read the NTFS master file table,
+    /// but the same user could run minimenta as administrator (Windows).
+    pub elevate: AtomicBool,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device
@@ -187,6 +190,8 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
             let result = mft::scan(path, opts.threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {
                 stop_listing.store(true, Relaxed);
+            } else if mft::limited_administrator() && mft::on_ntfs(path) {
+                progress.elevate.store(true, Relaxed);
             }
             result
         });

@@ -459,8 +459,13 @@ impl Browser {
 /// Says when the tree came from the cache, so stale data never looks fresh.
 fn describe(source: &Source) -> Option<String> {
     let Source::Cached { listed, age_secs } = *source else {
-        return matches!(source, Source::MasterFileTable)
-            .then(|| "Read the NTFS master file table directly. Press r to rescan.".to_string());
+        return match source {
+            Source::MasterFileTable => {
+                Some("Read the NTFS master file table directly. Press r to rescan.".to_string())
+            }
+            Source::ScannedNotElevated => Some(cache::ELEVATE_HINT.to_string()),
+            _ => None,
+        };
     };
     let age = match age_secs {
         0..60 => "less than a minute".to_string(),

@@ -148,7 +148,7 @@ fn summary(args: Args) -> ExitCode {
             let tree = scan.dir;
             let t = tree.totals();
             let from = match scan.source {
-                Source::Scanned => "full scan".to_string(),
+                Source::Scanned | Source::ScannedNotElevated => "full scan".to_string(),
                 Source::MasterFileTable => "NTFS master file table".to_string(),
                 Source::Cached { listed, .. } => {
                     format!("cache, {listed} directories listed again")
@@ -163,6 +163,10 @@ fn summary(args: Args) -> ExitCode {
                 start.elapsed().as_secs_f64(),
                 dir.display()
             );
+            // On stderr, so scripts that read the summary line are not affected.
+            if matches!(scan.source, Source::ScannedNotElevated) {
+                eprintln!("minimenta: {}", cache::ELEVATE_HINT);
+            }
             // Freeing millions of nodes takes time and the process ends here anyway.
             std::mem::forget(tree);
             ExitCode::SUCCESS
