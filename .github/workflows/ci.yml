@@ -64,7 +64,7 @@ jobs:
       - name: Cold-cache comparison (experiment)
         run: |
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          NCDU="$RUNNER_TEMP/ncdu" bench/cold.sh /usr 3 | tee -a "$GITHUB_STEP_SUMMARY"
+          NCDU="$RUNNER_TEMP/ncdu" bench/cold.sh /usr 3 "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Profile system calls per directory
         run: |

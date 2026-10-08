@@ -34,6 +34,11 @@ impl Drop for Fd {
     }
 }
 
+fn inode_order() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MINIMENTA_INODE_ORDER").is_some())
+}
+
 pub(super) fn read_dir(
     ctx: &Ctx,
     path: &CStr,
@@ -69,17 +74,27 @@ pub(super) fn read_dir(
                 return Ok(());
             }
             let base = buf.as_ptr().cast::<u8>();
+            let mut records = Vec::new();
             let mut off = 0;
             while off < n as usize {
                 // SAFETY: the kernel wrote `n` bytes of whole records, each
-                // with its length and a NUL-terminated name.
+                // with its inode, its length and a NUL-terminated name.
                 unsafe {
                     let p = base.add(off);
+                    records.push((p.cast::<u64>().read_unaligned(), off));
                     off += p.add(RECLEN).cast::<u16>().read_unaligned() as usize;
-                    let name = CStr::from_ptr(p.add(NAME).cast());
-                    if !matches!(name.to_bytes(), b"." | b"..") {
-                        add_entry(ctx, fd.0, name, dir, subdirs);
-                    }
+                }
+            }
+            // Experiment: stat in inode order instead of hash order, so the
+            // inode table is read sequentially when the cache is cold.
+            if inode_order() {
+                records.sort_unstable_by_key(|&(ino, _)| ino);
+            }
+            for (_, off) in records {
+                // SAFETY: `off` is the start of a record written above.
+                let name = unsafe { CStr::from_ptr(base.add(off + NAME).cast()) };
+                if !matches!(name.to_bytes(), b"." | b"..") {
+                    add_entry(ctx, fd.0, name, dir, subdirs);
                 }
             }
         }
