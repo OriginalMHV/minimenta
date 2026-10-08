@@ -5,11 +5,13 @@
 <p align="center">
   <a href="https://github.com/OriginalMHV/minimenta/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OriginalMHV/minimenta/ci.yml?branch=main&style=flat-square&labelColor=59636E&color=1A7F5A&label=CI" alt="CI status"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-2024%20edition-1A7F5A?style=flat-square&labelColor=59636E" alt="Rust 2024 edition"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-1A7F5A?style=flat-square&labelColor=59636E" alt="Runs on macOS and Linux">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-1A7F5A?style=flat-square&labelColor=59636E" alt="Runs on macOS, Linux and Windows">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-1A7F5A?style=flat-square&labelColor=59636E" alt="MIT or Apache-2.0 license"></a>
 </p>
 
 minimenta is an interactive disk usage analyzer for the terminal, written in Rust. It looks and feels like ncdu, scans faster, and lets you select many items and move them to the Trash in one step.
+
+*Minuere impedimenta* is Latin for "reduce the baggage". *Impedimenta* was the baggage train of a Roman army: everything that slowed it down.
 
 ## Why minimenta
 
@@ -30,15 +32,17 @@ minimenta is an interactive disk usage analyzer for the terminal, written in Rus
 cargo install --git https://github.com/OriginalMHV/minimenta
 ```
 
-minimenta runs on macOS and Linux. Building it needs a recent stable Rust toolchain.
+This installs two commands: `minimenta` and its short name `mm`. minimenta runs on macOS, Linux and Windows. Building it needs a recent stable Rust toolchain and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`.
 
 ## Usage
 
 ```sh
-minimenta                    # ask which folder to scan
-minimenta ~/code             # scan ~/code at once
-minimenta --summary ~/code   # print the totals without the interface
+mm                           # ask which folder to scan
+mm ~/code                    # scan ~/code at once
+mm --summary ~/code          # print the totals without the interface
 ```
+
+`mm` and `minimenta` are the same program.
 
 1. The prompt shows the current folder. Press Enter to scan it, or type another path. Tab completes folder names and Ctrl+U clears the line.
 2. The browser lists the items in the folder, largest first. Open a folder with Enter and go back with Left.
