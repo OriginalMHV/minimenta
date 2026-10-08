@@ -76,6 +76,7 @@ Press Esc during a scan to cancel it, or `q` to quit.
 | `-x`, `--one-file-system` | Do not cross file system boundaries |
 | `-t N`, `--threads N` | Use N scan threads (default: the number of CPU cores, at least 16) |
 | `--no-cache` | Scan everything, and do not read or write the cache (macOS) |
+| `--no-mft` | Do not read the NTFS master file table (Windows) |
 | `--cache` | Use the cache together with `--summary`, which scans everything by default |
 | `--summary` | Scan, print the totals, and exit |
 | `-h`, `--help` | Print the help |
@@ -96,16 +97,27 @@ You usually open a disk analyzer because the disk is full. Many folders have not
 | Warm cache, against ncdu at its best (`-t <cores>`) | 1.5x to 1.8x faster | about even (1.05x) |
 | Repeat scan of a folder with the cache (macOS only) | 0.05 s instead of 2 to 4 s | no cache |
 
+ncdu does not run on Windows, so there minimenta is compared with gdu 5.38.0 and dua-cli 2.45.1:
+
+| Comparison on Windows | against gdu | against dua-cli |
+| --- | --- | --- |
+| Cold disk, as administrator | about 3.5x faster | about 4x faster |
+| Warm cache | 1.6x to 2.3x faster | 1.9x to 2.4x faster |
+
+Without administrator rights, minimenta lists directories like the other tools, and a cold scan is about as fast as gdu. Microsoft Defender is off on the GitHub Windows runners. Most Windows PCs run it, so expect smaller differences there.
+
 How the numbers were measured:
 
 - **Cold disk:** [`bench/cold.sh`](bench/cold.sh) drops the file cache before every run (`purge` on macOS, `drop_caches` on Linux) and runs both tools in alternating pairs. The CI benchmark jobs run it on GitHub runners. Only a few pairs fit in a CI run, so expect differences of about 10% between runs.
 - **Warm cache:** [`bench/throughput.sh`](bench/throughput.sh) scans a fixed synthetic tree of about 51,000 items in 60 alternating pairs and reports the median time ratio.
+- **Windows:** [`bench/windows.sh`](bench/windows.sh) runs on a GitHub runner with 4 cores. Cold runs scan `C:\Program Files` (304,060 items) after [`bench/windows-purge.ps1`](bench/windows-purge.ps1) clears the file cache, 3 pairs per tool. Warm runs scan the synthetic tree and `C:\Program Files`.
 - **Repeat scans:** measured on a 10-core Mac with Microsoft Defender, on trees with 210,000 and 413,000 items. A repeat scan is not comparable with a first scan, so it has its own row.
 
 Why minimenta is faster:
 
 - **More threads.** A scan mostly waits on the disk and the kernel, so minimenta uses at least 16 threads. ncdu uses 1 thread unless you pass `-t`.
 - **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there. On a cold Linux disk, reading the directory blocks takes almost all the time, and the order of those reads decides the speed. ncdu's order is about 5% faster there (8 cold pairs on `/usr`).
+- **The master file table on Windows.** As administrator on NTFS, minimenta reads the master file table of the volume in large parallel blocks, as WizTree does, while it lists directories. On a cold disk, this replaces thousands of small reads. The first result to finish wins, so a warm scan does not wait for the table.
 - **The cache on macOS.** minimenta keeps the last scan of each folder in `~/Library/Caches/minimenta` and asks FSEvents which directories changed since. It lists only those again. The browser says when it shows a cached scan, and `r` scans everything again.
 
 The goal of 2x over ncdu at its best is not reached on a cold disk.
