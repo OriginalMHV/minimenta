@@ -52,7 +52,11 @@ fn counts(fd: libc::c_int, dev: libc::dev_t) -> Counts {
         let exact = matches!(name.to_bytes(), b"apfs" | b"hfs");
         Counts {
             exact,
-            zero_is_empty: exact && fs.f_flags & libc::MNT_ROOTFS as u32 != 0,
+            zero_is_empty: zero_is_empty(
+                exact,
+                fs.f_flags & libc::MNT_ROOTFS as u32 != 0,
+                crate::cache::firmlinks(),
+            ),
         }
     } else {
         Counts::default()
@@ -61,6 +65,13 @@ fn counts(fd: libc::c_int, dev: libc::dev_t) -> Counts {
     known[0] = Some((dev, counts));
     COUNTS.set(known);
     counts
+}
+
+/// Whether a count of 0 means an empty folder: on the system volume, when
+/// the firmlinks are known. Their placeholders report 0 entries as well, so
+/// without the table every folder is opened.
+fn zero_is_empty(exact: bool, root_fs: bool, firmlinks: &[(PathBuf, PathBuf)]) -> bool {
+    exact && root_fs && !firmlinks.is_empty()
 }
 
 /// Whether `parent/name` is a firmlink. A firmlink reports the entry count of
@@ -325,6 +336,21 @@ mod tests {
         assert!(!super::is_firmlink_in(&table, b"/usr", b"cups"));
         assert!(!super::is_firmlink_in(&table, b"/usr/libexec", b"cup"));
         assert!(!super::is_firmlink_in(&table, b"/", b"Use"));
+    }
+
+    /// A firmlink placeholder such as /Users reports 0 entries. Without the
+    /// table, for example in a sandbox that cannot read it, it would look
+    /// empty and the home folders would be missing.
+    #[test]
+    fn without_the_firmlink_table_zero_counts_are_not_trusted() {
+        let table = [(
+            PathBuf::from("/Users"),
+            PathBuf::from("/System/Volumes/Data/Users"),
+        )];
+        assert!(super::zero_is_empty(true, true, &table));
+        assert!(!super::zero_is_empty(true, true, &[]));
+        assert!(!super::zero_is_empty(true, false, &table));
+        assert!(!super::zero_is_empty(false, true, &table));
     }
 
     /// Items and bytes of `path` found with plain `std::fs` calls, counting
