@@ -28,7 +28,7 @@ directories that FSEvents reports as changed. Press r to rescan.
 
 Options:
   -x, --one-file-system  Do not cross file system boundaries
-  -t, --threads N        Number of scan threads (default: CPU count, at least 16 on Linux)
+  -t, --threads N        Number of scan threads (default: CPU count, at least 16)
       --no-cache         Always scan everything, and do not read or write the cache
       --cache            Use the cache with --summary too (it scans fully by default)
       --summary          Scan, print the totals, and exit
@@ -41,16 +41,13 @@ struct Args {
     summary: bool,
 }
 
-/// On Linux a cold scan waits on the disk, and 16 threads keep enough requests
-/// in flight: about 1.28x faster cold, and 1% slower warm, on a 4-core runner.
-/// On macOS, more threads than cores made warm scans slower.
+/// A scan waits on the disk and the kernel, so more threads than cores help:
+/// 16 threads were about 1.5x faster than 3 on a 3-core macOS runner, cold and
+/// warm, 1.28x faster cold on a 4-core Linux runner, and 1.05x faster than 10
+/// on a 10-core Mac.
 fn default_threads() -> usize {
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-    if cfg!(target_os = "linux") {
-        cores.max(16)
-    } else {
-        cores
-    }
+    cores.max(16)
 }
 
 fn parse_args() -> Result<Args, String> {
