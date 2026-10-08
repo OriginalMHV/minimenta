@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# An explicit bash shell runs with -eo pipefail, so `cmd | tee` fails when cmd fails.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   check:
     strategy:
@@ -35,3 +40,31 @@ jobs:
         run: |
           cc -O2 -o "$RUNNER_TEMP/syscalls" bench/syscalls.c
           "$RUNNER_TEMP/syscalls" "$RUNNER_TEMP/bench-tree" "$(sysctl -n hw.ncpu)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Ubuntu packages ncdu 1.x, which has no -t, so this uses the official static
+  # ncdu 2.x build. The checksum pins the release, whose PGP signature by
+  # Yoran Heling (7446 0D32 B808 10EB A9AF A2E9 6239 4C69 8C27 39FA) was checked.
+  benchmark-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ncdu 2.9.1
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/ncdu.tar.gz" https://dev.yorhel.nl/download/ncdu-2.9.1-linux-x86_64.tar.gz
+          echo "0c6c84b3f763c33baa051c8327f0e736f46f33a8cc061bb951d24517a8c5d73e  $RUNNER_TEMP/ncdu.tar.gz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/ncdu.tar.gz"
+          "$RUNNER_TEMP/ncdu" --version
+      - name: Compare totals with du on /usr
+        run: MINIMENTA_DU_TREE=/usr cargo test --release -- --ignored --nocapture totals_match_du_on_a_real_tree 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          NCDU="$RUNNER_TEMP/ncdu" bench/throughput.sh "$RUNNER_TEMP/bench-tree" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Profile system calls per directory
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq liburing-dev
+          cc -O2 -o "$RUNNER_TEMP/syscalls_linux" bench/syscalls_linux.c -luring
+          "$RUNNER_TEMP/syscalls_linux" "$RUNNER_TEMP/bench-tree" "$(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

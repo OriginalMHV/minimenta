@@ -27,8 +27,9 @@ pub(super) fn read_dir(
             if ctx.one_fs && meta.dev() != ctx.root_dev {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
             } else {
+                // A directory counts its own blocks but no apparent size, as `du` does.
                 subdirs.push((dir.entries.len(), 0));
-                dir.push(name, Kind::Dir, 0, 0, 0);
+                dir.push(name, Kind::Dir, meta.blocks() * 512, 0, 0);
             }
             continue;
         }

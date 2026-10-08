@@ -17,9 +17,22 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
-#[cfg(not(target_os = "macos"))]
+// On 32-bit glibc, `fstatat` with `struct stat` fails with EOVERFLOW for large
+// files, so those targets use the generic scanner.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod linux;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+use linux as platform;
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", target_pointer_width = "64")
+)))]
 mod generic;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", target_pointer_width = "64")
+)))]
 use generic as platform;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,7 +64,10 @@ impl Ctx<'_> {
 }
 
 /// Scans `path` completely and returns its contents sorted by disk usage.
+/// A symlink to a directory is followed for the root only.
 pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir> {
+    // The scanners open directories with O_NOFOLLOW, so resolve the root first.
+    let path = &fs::canonicalize(path)?;
     let meta = fs::metadata(path)?;
     if !meta.is_dir() {
         return Err(io::Error::new(
@@ -71,13 +87,22 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = CString::new(path.as_os_str().as_bytes())?;
-    let (dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0));
+    // The macOS scanner does not count directory blocks, so the root does not either.
+    if cfg!(not(target_os = "macos")) {
+        dir.own_disk = meta.blocks() * 512;
+    }
     if progress.cancel.load(Relaxed) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     match result {
         Err(e) if dir.entries.is_empty() => Err(e),
-        _ => Ok(dir),
+        _ => {
+            // Only the root is sorted here. The browser sorts each directory
+            // when it opens it, so most directories are never sorted at all.
+            dir.sort(Sort::default());
+            Ok(dir)
+        }
     }
 }
 
@@ -105,11 +130,12 @@ fn scan_dir(ctx: &Ctx, path: CString, expected: u32) -> (Dir, io::Result<()>) {
                 scan_dir(ctx, child_path(parent, dir.name(&dir.entries[i])), expected)
             })
             .collect();
-        for (&(i, _), (sub, result)) in subdirs.iter().zip(scanned) {
+        for (&(i, _), (mut sub, result)) in subdirs.iter().zip(scanned) {
+            // The listing stored the directory's own blocks in its entry.
+            sub.own_disk = dir.entries[i].disk;
             dir.attach(i, sub, if result.is_err() { flag::ERROR } else { 0 });
         }
     }
-    dir.sort(Sort::default());
     (dir, result)
 }
 
@@ -124,7 +150,10 @@ fn child_path(parent: &[u8], name: &[u8]) -> CString {
     unsafe { CString::from_vec_unchecked(path) }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", target_pointer_width = "64")
+)))]
 fn as_path(path: &std::ffi::CStr) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()))
 }
@@ -216,5 +245,37 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
+    fn follows_a_symlink_given_as_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("real/sub")).unwrap();
+        write(&tmp.path().join("real/sub/data.bin"), 3000);
+        std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("alias")).unwrap();
+
+        let via_link = scan(&tmp.path().join("alias"), &opts(), &Progress::default()).unwrap();
+        let direct = scan(&tmp.path().join("real"), &opts(), &Progress::default()).unwrap();
+
+        assert_eq!(via_link.totals(), direct.totals());
+        assert_eq!(via_link.totals().apparent, 3000);
+        assert_eq!(via_link.totals().items, 2);
+    }
+
+    #[test]
+    fn refreshing_a_scanned_tree_keeps_its_totals() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
+        write(&tmp.path().join("a/b/c/deep.bin"), 10_000);
+        let dir = scan(tmp.path(), &opts(), &Progress::default()).unwrap();
+        let mut tree = crate::tree::Tree {
+            path: tmp.path().to_path_buf(),
+            dir: Box::new(dir),
+        };
+        let before = tree.dir.totals();
+
+        tree.refresh_totals(&[0, 0, 0]);
+
+        assert_eq!(tree.dir.totals(), before);
     }
 }
