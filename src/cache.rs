@@ -344,13 +344,34 @@ fn volume_of(path: &Path) -> Option<[u8; 16]> {
 
 #[cfg(target_os = "macos")]
 fn mounts_under(root: &Path) -> Vec<Mount> {
-    let mut list: *mut libc::statfs = std::ptr::null_mut();
-    let count = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
     const MNT_RDONLY: u32 = 0x1;
-    let mut mounts: Vec<Mount> = (0..count.max(0) as usize)
-        .filter_map(|i| {
-            // SAFETY: getmntinfo returned `count` entries in a buffer it owns.
-            let fs = unsafe { &*list.add(i) };
+    // getmntinfo shares one global buffer between threads, so use getfsstat
+    // with a buffer of our own.
+    let mut list: Vec<libc::statfs> = Vec::new();
+    for _ in 0..4 {
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        if count <= 0 {
+            return Vec::new();
+        }
+        // Room for mounts that appear between the two calls.
+        let capacity = count as usize + 8;
+        list = Vec::with_capacity(capacity);
+        let bytes = (capacity * size_of::<libc::statfs>()) as libc::c_int;
+        let filled = unsafe { libc::getfsstat(list.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        if filled < 0 {
+            return Vec::new();
+        }
+        if (filled as usize) < capacity {
+            // SAFETY: getfsstat wrote `filled` complete entries.
+            unsafe { list.set_len(filled as usize) };
+            break;
+        }
+        list.clear();
+    }
+    let mut mounts: Vec<Mount> = list
+        .iter()
+        .filter_map(|fs| {
+            // SAFETY: f_mntonname is a NUL-terminated C string written by the kernel.
             let name = unsafe { std::ffi::CStr::from_ptr(fs.f_mntonname.as_ptr()) };
             let path = PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()));
             // SAFETY: fsid_t is two 32-bit integers with a private field.
