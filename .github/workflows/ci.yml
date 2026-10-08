@@ -100,26 +100,3 @@ jobs:
           bench/windows.sh "$t/bench-tree" 30 | tee -a "$GITHUB_STEP_SUMMARY"
           COLD_PAIRS=3 bench/windows.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - name: "Experiment: MFT start gate (temporary)"
-        run: |
-          bin=./target/release/minimenta.exe
-          tree="C:/Program Files"
-          purge="powershell -NoProfile -ExecutionPolicy Bypass -File bench/windows-purge.ps1"
-          run() { echo "env MINIMENTA_MFT_GATE=$1 $bin --summary '$tree'"; }
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          {
-            for gate in window average none; do
-              for i in 1 2; do
-                $purge
-                echo "-- cold profile, gate $gate"
-                MINIMENTA_PROFILE=1 MINIMENTA_MFT_GATE=$gate $bin --summary "$tree" 2>&1
-              done
-            done
-            echo "-- cold: A = gate window, B = gate average"
-            python -I bench/interleave.py --prepare "$purge" 5 "$(run window)" "$(run average)"
-            echo "-- cold: A = gate window, B = gate none"
-            python -I bench/interleave.py --prepare "$purge" 5 "$(run window)" "$(run none)"
-            echo "-- warm: A = gate window, B = gate none"
-            python -I bench/interleave.py 10 "$(run window)" "$(run none)"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"

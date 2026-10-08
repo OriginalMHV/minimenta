@@ -17,7 +17,6 @@ dua="$DUA '$tree'"
 
 cargo build --release -q
 echo "$($bin --summary "$tree")"
-for i in 1 2 3; do MINIMENTA_PROFILE=1 $bin --summary "$tree" 2>&1 >/dev/null | grep '^mft:' || true; done
 echo "-- warm: A = minimenta, B = minimenta --no-mft"
 $py -I bench/interleave.py "$pairs" "$mm" "$listing"
 echo "-- warm: A = minimenta, B = gdu (defaults)"

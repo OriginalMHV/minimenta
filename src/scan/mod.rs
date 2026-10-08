@@ -199,9 +199,7 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
 /// nothing for the race.
 #[cfg(windows)]
 fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
-    let gate = std::env::var("MINIMENTA_MFT_GATE").unwrap_or_default();
-    let started = std::time::Instant::now();
-    let mut last = (started, 0);
+    let mut last = (std::time::Instant::now(), 0);
     loop {
         std::thread::park_timeout(MFT_WINDOW);
         if done.load(Relaxed) {
@@ -212,18 +210,8 @@ fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
             continue;
         }
         let items = progress.items.load(Relaxed);
-        let (since, from) = match gate.as_str() {
-            "average" => (started, 0),
-            _ => last,
-        };
-        let rate = (items - from) as f64 / (now - since).as_secs_f64();
-        if gate == "none" || rate < MFT_START_RATE {
-            if std::env::var_os("MINIMENTA_PROFILE").is_some() {
-                eprintln!(
-                    "race: reader started after {} ms, {items} items listed, {rate:.0} items/s",
-                    (now - started).as_millis()
-                );
-            }
+        let rate = (items - last.1) as f64 / (now - last.0).as_secs_f64();
+        if rate < MFT_START_RATE {
             return true;
         }
         last = (now, items);
