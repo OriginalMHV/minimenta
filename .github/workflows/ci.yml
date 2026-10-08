@@ -75,3 +75,28 @@ jobs:
           cc -O2 -o "$RUNNER_TEMP/syscalls_linux" bench/syscalls_linux.c -luring
           "$RUNNER_TEMP/syscalls_linux" "$RUNNER_TEMP/bench-tree" "$(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  benchmark-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install gdu 5.38.0 and dua-cli 2.45.1
+        run: |
+          t=$(cygpath -m "$RUNNER_TEMP")
+          curl -sSfL -o "$t/gdu.zip" https://github.com/dundee/gdu/releases/download/v5.38.0/gdu_windows_amd64.exe.zip
+          echo "22e6616e0bdc25d8d803934b4d3189996ebf74de8ac9b3635a4e4e079c3d7f8a  $t/gdu.zip" | sha256sum -c -
+          curl -sSfL -o "$t/dua.zip" https://github.com/Byron/dua-cli/releases/download/v2.45.1/dua-v2.45.1-x86_64-pc-windows-msvc.zip
+          echo "48c245f987c5359df0302202e6338e3235e4a4724db58d7d66138b096e8b2015  $t/dua.zip" | sha256sum -c -
+          mkdir -p "$t/tools" && unzip -q -o "$t/gdu.zip" -d "$t/tools" && unzip -q -o -j "$t/dua.zip" -d "$t/tools"
+          ls "$t/tools"
+      - name: Compare with gdu and dua-cli (warm)
+        run: |
+          t=$(cygpath -m "$RUNNER_TEMP")
+          python -I bench/gen_tree.py "$t/bench-tree"
+          export GDU="$t/tools/gdu_windows_amd64.exe" DUA="$t/tools/dua.exe"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          bench/windows.sh "$t/bench-tree" 30 | tee -a "$GITHUB_STEP_SUMMARY"
+          bench/windows.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
