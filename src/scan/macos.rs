@@ -23,8 +23,9 @@ const BUF_WORDS: usize = 32 * 1024;
 
 thread_local! {
     static BUF: RefCell<Box<[u64]>> = RefCell::new(vec![0; BUF_WORDS].into_boxed_slice());
-    /// The last device seen and what its entry counts are good for.
-    static COUNTS: Cell<Option<(libc::dev_t, Counts)>> = const { Cell::new(None) };
+    /// The devices seen last and what their entry counts are good for. A
+    /// scan through a firmlink moves between two volumes all the time.
+    static COUNTS: Cell<[Option<(libc::dev_t, Counts)>; 4]> = const { Cell::new([None; 4]) };
 }
 
 #[derive(Clone, Copy, Default)]
@@ -40,10 +41,9 @@ struct Counts {
 }
 
 fn counts(fd: libc::c_int, dev: libc::dev_t) -> Counts {
-    if let Some((known, counts)) = COUNTS.get()
-        && known == dev
-    {
-        return counts;
+    let mut known = COUNTS.get();
+    if let Some((_, counts)) = known.iter().flatten().find(|(d, _)| *d == dev) {
+        return *counts;
     }
     let mut fs: libc::statfs = unsafe { zeroed() };
     let counts = if unsafe { libc::fstatfs(fd, &raw mut fs) } == 0 {
@@ -57,7 +57,9 @@ fn counts(fd: libc::c_int, dev: libc::dev_t) -> Counts {
     } else {
         Counts::default()
     };
-    COUNTS.set(Some((dev, counts)));
+    known.rotate_right(1);
+    known[0] = Some((dev, counts));
+    COUNTS.set(known);
     counts
 }
 
