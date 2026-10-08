@@ -1,10 +1,12 @@
 //! Reads a whole directory with `getattrlistbulk(2)`. One call returns names,
 //! types, and sizes for many entries, so there is no `lstat` per file.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::io;
 use std::mem::{size_of, zeroed};
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::slice;
 
 use super::{Ctx, SubDir};
@@ -21,6 +23,59 @@ const BUF_WORDS: usize = 32 * 1024;
 
 thread_local! {
     static BUF: RefCell<Box<[u64]>> = RefCell::new(vec![0; BUF_WORDS].into_boxed_slice());
+    /// The last device seen and what its entry counts are good for.
+    static COUNTS: Cell<Option<(libc::dev_t, Counts)>> = const { Cell::new(None) };
+}
+
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    /// The file system keeps an exact entry count for every directory, as
+    /// APFS and HFS+ do. Others may leave it out or estimate it.
+    exact: bool,
+    /// A directory with a count of 0 is empty and need not be opened. This
+    /// holds on the system volume, a sealed APFS snapshot, except for its
+    /// firmlinks. Other volumes can have graft points, such as the cryptexes
+    /// in /System/Volumes/Preboot, which report 0 entries and no flag.
+    zero_is_empty: bool,
+}
+
+fn counts(fd: libc::c_int, dev: libc::dev_t) -> Counts {
+    if let Some((known, counts)) = COUNTS.get()
+        && known == dev
+    {
+        return counts;
+    }
+    let mut fs: libc::statfs = unsafe { zeroed() };
+    let counts = if unsafe { libc::fstatfs(fd, &raw mut fs) } == 0 {
+        // SAFETY: f_fstypename is a NUL-terminated C string written by the kernel.
+        let name = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) };
+        let exact = matches!(name.to_bytes(), b"apfs" | b"hfs");
+        Counts {
+            exact,
+            zero_is_empty: exact && fs.f_flags & libc::MNT_ROOTFS as u32 != 0,
+        }
+    } else {
+        Counts::default()
+    };
+    COUNTS.set(Some((dev, counts)));
+    counts
+}
+
+/// Whether `parent/name` is a firmlink. A firmlink reports the entry count of
+/// its empty placeholder, not of the folder it leads to.
+fn is_firmlink(parent: &[u8], name: &[u8]) -> bool {
+    is_firmlink_in(crate::cache::firmlinks(), parent, name)
+}
+
+fn is_firmlink_in(table: &[(PathBuf, PathBuf)], parent: &[u8], name: &[u8]) -> bool {
+    let parent = parent.strip_suffix(b"/").unwrap_or(parent);
+    table.iter().any(|(link, _)| {
+        let link = link.as_os_str().as_bytes();
+        link.len() == parent.len() + 1 + name.len()
+            && link.starts_with(parent)
+            && link[parent.len()] == b'/'
+            && link.ends_with(name)
+    })
 }
 
 struct Fd(libc::c_int);
@@ -85,7 +140,7 @@ pub(super) fn read_dir(
                 // SAFETY: the kernel wrote `n` packed entries, each starting with its length.
                 unsafe {
                     let len: u32 = read(p, 0);
-                    add_entry(ctx, p, dir, subdirs);
+                    add_entry(ctx, fd.0, path.to_bytes(), p, dir, subdirs);
                     p = p.add(len as usize);
                 }
             }
@@ -107,8 +162,16 @@ unsafe fn read<T: Copy>(p: *const u8, offset: usize) -> T {
 /// attributes and everything else carries the file attributes, never both.
 /// `FSOPT_PACK_INVAL_ATTRS` keeps every slot inside a group, so the offsets
 /// are fixed.
-unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
+unsafe fn add_entry(
+    ctx: &Ctx,
+    fd: libc::c_int,
+    parent: &[u8],
+    p: *const u8,
+    dir: &mut Dir,
+    subdirs: &mut Vec<SubDir>,
+) {
     unsafe {
+        let returned: libc::attribute_set_t = read(p, size_of::<u32>());
         let mut o = size_of::<u32>() + size_of::<libc::attribute_set_t>();
         let error: u32 = read(p, o);
         o += 4;
@@ -131,12 +194,30 @@ unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<Su
         if objtype == VDIR {
             let entry_count: u32 = read(p, o);
             let mount_status: u32 = read(p, o + 4);
+            // A mount point reports the count of the directory it covers.
+            let counts = if returned.dirattr & libc::ATTR_DIR_ENTRYCOUNT != 0 && mount_status == 0 {
+                counts(fd, dev)
+            } else {
+                Counts::default()
+            };
+            let index = dir.entries.len();
             if ctx.one_fs && mount_status & DIR_MNTSTATUS_MNTPOINT != 0 {
                 dir.push(name, Kind::Dir, 0, 0, flag::OTHER_FS);
+            } else if counts.zero_is_empty && entry_count == 0 && !is_firmlink(parent, name) {
+                // An empty directory needs no open, listing, and close.
+                dir.push(name, Kind::Dir, 0, 0, 0);
+                dir.attach(
+                    index,
+                    Dir {
+                        id: ino,
+                        ..Dir::default()
+                    },
+                    0,
+                );
             } else {
                 subdirs.push(SubDir {
-                    index: dir.entries.len(),
-                    expected: entry_count,
+                    index,
+                    expected: if counts.exact { entry_count } else { 0 },
                     ino,
                 });
                 dir.push(name, Kind::Dir, 0, 0, 0);
@@ -160,5 +241,171 @@ unsafe fn add_entry(ctx: &Ctx, p: *const u8, dir: &mut Dir, subdirs: &mut Vec<Su
             }
         }
         dir.push(name, kind, alloc.max(0) as u64, data.max(0) as u64, flags);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Options, Progress, scan};
+    use crate::tree::{Dir, Entry};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn opts() -> Options {
+        Options {
+            one_fs: false,
+            threads: 4,
+            cache: false,
+            mft: false,
+        }
+    }
+
+    fn entry<'a>(dir: &'a Dir, name: &str) -> &'a Entry {
+        &dir.entries[dir.find(name.as_bytes()).unwrap()]
+    }
+
+    fn subtree<'a>(dir: &'a Dir, name: &str) -> &'a Dir {
+        entry(dir, name).dir.as_deref().unwrap()
+    }
+
+    /// Detaches the disk image even when an assertion fails.
+    struct Mounted(PathBuf);
+
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            let _ = Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.0)
+                .status();
+        }
+    }
+
+    /// Attaches a new APFS disk image at `mount`, or returns `None` when
+    /// hdiutil cannot.
+    fn attach(image: &Path, mount: &Path) -> Option<Mounted> {
+        let created = Command::new("hdiutil")
+            .args(["create", "-quiet", "-size", "16m", "-fs", "APFS"])
+            .args(["-volname", "mmtest"])
+            .arg(image)
+            .status()
+            .ok()?;
+        if !created.success() {
+            return None;
+        }
+        let mounted = Mounted(mount.to_path_buf());
+        let attached = Command::new("hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(mount)
+            .arg(image)
+            .status()
+            .ok()?;
+        attached.success().then_some(mounted)
+    }
+
+    #[test]
+    fn firmlinks_are_found_below_the_root_and_deeper() {
+        let table = [
+            (
+                PathBuf::from("/Users"),
+                PathBuf::from("/System/Volumes/Data/Users"),
+            ),
+            (
+                PathBuf::from("/usr/libexec/cups"),
+                PathBuf::from("/System/Volumes/Data/usr/libexec/cups"),
+            ),
+        ];
+        assert!(super::is_firmlink_in(&table, b"/", b"Users"));
+        assert!(super::is_firmlink_in(&table, b"/usr/libexec", b"cups"));
+        assert!(super::is_firmlink_in(&table, b"/usr/libexec/", b"cups"));
+        assert!(!super::is_firmlink_in(&table, b"/usr", b"cups"));
+        assert!(!super::is_firmlink_in(&table, b"/usr/libexec", b"cup"));
+        assert!(!super::is_firmlink_in(&table, b"/", b"Use"));
+    }
+
+    /// Items and bytes of `path` found with plain `std::fs` calls, counting
+    /// each hard-linked file once.
+    fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>) -> (u64, u64) {
+        let Ok(list) = fs::read_dir(path) else {
+            return (0, 0);
+        };
+        let (mut items, mut bytes) = (0, 0);
+        for e in list.flatten() {
+            let meta = e.path().symlink_metadata().unwrap();
+            items += 1;
+            if meta.is_dir() {
+                let (i, b) = walk(&e.path(), seen);
+                (items, bytes) = (items + i, bytes + b);
+            } else if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {
+                bytes += meta.len();
+            }
+        }
+        (items, bytes)
+    }
+
+    /// On the system volume, empty folders are not opened. /usr/libexec has
+    /// empty folders and the firmlink cups, which leads to the data volume.
+    #[test]
+    fn a_system_folder_counts_the_same_as_a_plain_walk() {
+        let root = Path::new("/usr/libexec");
+        if !root.is_dir() {
+            eprintln!("skipped: no /usr/libexec");
+            return;
+        }
+        let dir = scan(root, &opts(), &Progress::default()).unwrap();
+        let (items, bytes) = walk(root, &mut HashSet::new());
+        let totals = dir.totals();
+        assert_eq!((totals.items, totals.apparent), (items, bytes));
+    }
+
+    /// A mount point reports the entry count of the folder it covers.
+    #[test]
+    fn a_volume_mounted_on_an_empty_folder_is_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let mount = root.join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        let Some(_mounted) = attach(&tmp.path().join("disk.dmg"), &mount) else {
+            eprintln!("skipped: hdiutil could not attach a disk image");
+            return;
+        };
+        fs::write(mount.join("on-the-image"), vec![1u8; 50_000]).unwrap();
+
+        let dir = scan(&root, &opts(), &Progress::default()).unwrap();
+
+        assert!(subtree(&dir, "mnt").find(b"on-the-image").is_some());
+        assert!(dir.totals().apparent >= 50_000);
+    }
+
+    /// More files than one listing call returns, on a volume mounted over a
+    /// folder with one entry. The count of the covered folder must not end
+    /// the listing early.
+    #[test]
+    fn a_volume_mounted_on_a_folder_with_entries_is_listed_completely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let mount = root.join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        fs::write(mount.join("covered"), b"x").unwrap();
+        let Some(_mounted) = attach(&tmp.path().join("disk.dmg"), &mount) else {
+            eprintln!("skipped: hdiutil could not attach a disk image");
+            return;
+        };
+        for i in 0..4000 {
+            fs::File::create(mount.join(format!("f{i:04}"))).unwrap();
+        }
+
+        let dir = scan(&root, &opts(), &Progress::default()).unwrap();
+
+        let mnt = subtree(&dir, "mnt");
+        let files = mnt
+            .entries
+            .iter()
+            .filter(|e| mnt.name(e).starts_with(b"f"))
+            .count();
+        assert_eq!(files, 4000);
+        assert!(mnt.find(b"covered").is_none());
     }
 }

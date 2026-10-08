@@ -236,12 +236,17 @@ fn error_count(dir: &Dir) -> usize {
 /// `/System/Volumes/Data/Users`. FSEvents may report either form, so an event
 /// counts for every form of its path.
 fn aliases(path: &Path) -> Vec<PathBuf> {
+    aliases_with(path, firmlinks())
+}
+
+/// The firmlinks of the system volume and the data folders they lead to.
+/// Empty before macOS 10.15, which has no firmlinks.
+pub fn firmlinks() -> &'static [(PathBuf, PathBuf)] {
     static TABLE: std::sync::OnceLock<Vec<(PathBuf, PathBuf)>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
+    TABLE.get_or_init(|| {
         fs::read_to_string("/usr/share/firmlinks")
             .map_or_else(|_| Vec::new(), |text| parse_firmlinks(&text))
-    });
-    aliases_with(path, table)
+    })
 }
 
 fn parse_firmlinks(text: &str) -> Vec<(PathBuf, PathBuf)> {
