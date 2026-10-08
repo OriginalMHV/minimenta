@@ -102,5 +102,5 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           bench/windows.sh "$t/bench-tree" 30 | tee -a "$GITHUB_STEP_SUMMARY"
           COLD_PAIRS=3 bench/windows.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
-          PY=python bench/allocator.sh "C:/Program Files" 10 --no-mft | tee -a "$GITHUB_STEP_SUMMARY"
+          PY=python bench/allocator.sh "C:/Program Files" 10 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
