@@ -38,6 +38,12 @@ mod generic;
 ))]
 use generic as platform;
 
+// The NTFS parser has no platform calls, so its tests run everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod ntfs;
+
+#[cfg(windows)]
+mod mft;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -79,6 +85,8 @@ pub struct Options {
     pub threads: usize,
     /// Load and save the cache (macOS only).
     pub cache: bool,
+    /// Read the NTFS master file table when possible (Windows, administrator).
+    pub mft: bool,
 }
 
 #[derive(Default)]
@@ -87,6 +95,8 @@ pub struct Progress {
     pub disk: AtomicU64,
     pub errors: AtomicU64,
     pub cancel: AtomicBool,
+    /// Set when the scan read the NTFS master file table.
+    pub mft: AtomicBool,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device
@@ -98,9 +108,16 @@ struct Ctx<'a> {
     root_dev: u64,
     progress: &'a Progress,
     hardlinks: Mutex<HashSet<(u64, u64)>>,
+    /// Stops the scan without counting as a cancel, for example when another
+    /// method finished first.
+    stop: &'a AtomicBool,
 }
 
 impl Ctx<'_> {
+    fn stopped(&self) -> bool {
+        self.progress.cancel.load(Relaxed) || self.stop.load(Relaxed)
+    }
+
     #[cfg_attr(windows, allow(dead_code))]
     fn first_link(&self, dev: u64, ino: u64) -> bool {
         self.hardlinks.lock().unwrap().insert((dev, ino))
@@ -119,11 +136,101 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
             "not a directory",
         ));
     }
+    #[cfg(windows)]
+    if opts.mft {
+        return race(path, opts, progress, &meta);
+    }
+    list(path, opts, progress, &meta, &AtomicBool::new(false))
+}
+
+/// The MFT reader starts only while the listing has listed fewer than
+/// `MFT_START_RATE` items per second over the last `MFT_WINDOW`. On the
+/// Windows runner, a warm listing of `C:\Program Files` ran at about 460,000
+/// items/s and a cold one at about 18,000 items/s. Starting the reader on a
+/// warm disk costs about 20%, and not starting it on a cold disk costs 3x to
+/// 5x, so the threshold leans towards starting.
+#[cfg(windows)]
+const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+#[cfg(windows)]
+const MFT_START_RATE: f64 = 150_000.0;
+
+/// Starts the MFT reader next to the directory listing and keeps the result
+/// that finishes first. The MFT reader must read the table of the whole
+/// volume (about 3 s for a 1.3 GB table), so a listing wins for small or warm
+/// folders, and the MFT wins on a cold disk, where a listing waits for
+/// thousands of small reads.
+#[cfg(windows)]
+fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
+    let stop_listing = AtomicBool::new(false);
+    let mft_progress = Progress::default();
+    std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            if !wait_for_slow_listing(progress, &mft_progress.cancel) {
+                return Ok(None);
+            }
+            let result = mft::scan(path, opts.threads, &mft_progress);
+            if matches!(result, Ok(Some(_))) {
+                stop_listing.store(true, Relaxed);
+            }
+            result
+        });
+        let waiting = reader.thread().clone();
+        let listed = list(path, opts, progress, meta, &stop_listing);
+        if stop_listing.load(Relaxed)
+            && let Ok(Ok(Some(mut dir))) = reader.join()
+        {
+            progress.mft.store(true, Relaxed);
+            progress
+                .items
+                .store(mft_progress.items.load(Relaxed), Relaxed);
+            dir.sort(Sort::default());
+            return Ok(dir);
+        }
+        // The listing finished first, or the MFT reader could not run. Wake
+        // the reader if it waits, so the scope does not wait for it.
+        mft_progress.cancel.store(true, Relaxed);
+        waiting.unpark();
+        listed
+    })
+}
+
+/// Waits until the listing is slow, and returns false when `done` is set
+/// first. Small or warm folders finish, or list fast enough, so they pay
+/// nothing for the race.
+#[cfg(windows)]
+fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
+    let mut last = (std::time::Instant::now(), 0);
+    loop {
+        std::thread::park_timeout(MFT_WINDOW);
+        if done.load(Relaxed) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if now - last.0 < MFT_WINDOW {
+            continue;
+        }
+        let items = progress.items.load(Relaxed);
+        let rate = (items - last.1) as f64 / (now - last.0).as_secs_f64();
+        if rate < MFT_START_RATE {
+            return true;
+        }
+        last = (now, items);
+    }
+}
+
+fn list(
+    path: &Path,
+    opts: &Options,
+    progress: &Progress,
+    meta: &fs::Metadata,
+    stop: &AtomicBool,
+) -> io::Result<Dir> {
     let ctx = Ctx {
         one_fs: opts.one_fs,
-        root_dev: dev_ino(&meta).0,
+        root_dev: dev_ino(meta).0,
         progress,
         hardlinks: Mutex::default(),
+        stop,
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
@@ -131,14 +238,14 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(&meta).1));
+    let (mut dir, result) = pool.install(|| scan_dir(&ctx, root, 0, dev_ino(meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::os::unix::fs::MetadataExt;
         dir.own_disk = meta.blocks() * 512;
     }
-    if progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     match result {
@@ -196,6 +303,7 @@ pub fn update(
         root_dev: dev_ino(&meta).0,
         progress,
         hardlinks: Mutex::default(),
+        stop: &AtomicBool::new(false),
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
@@ -231,7 +339,7 @@ pub fn update(
     let mut listed = 0;
     pool.install(|| {
         for (components, recursive) in &targets {
-            if ctx.progress.cancel.load(Relaxed) {
+            if ctx.stopped() {
                 break;
             }
             let path = components
@@ -263,7 +371,7 @@ pub fn update(
         }
         Ok::<_, io::Error>(())
     })?;
-    if ctx.progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
     }
     fix_totals(dir);
@@ -400,7 +508,7 @@ fn scan_dir(ctx: &Ctx, path: NativePath, expected: u32, id: u64) -> (Dir, io::Re
         id,
         ..Dir::default()
     };
-    if ctx.progress.cancel.load(Relaxed) {
+    if ctx.stopped() {
         return (dir, Ok(()));
     }
     let mut subdirs = Vec::new();
@@ -475,6 +583,7 @@ mod tests {
             one_fs: false,
             threads: 4,
             cache: false,
+            mft: false,
         }
     }
 

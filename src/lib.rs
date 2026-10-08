@@ -39,6 +39,7 @@ Options:
   -x, --one-file-system  Do not cross file system boundaries
   -t, --threads N        Number of scan threads (default: CPU count, at least 16)
       --no-cache         Always scan everything, and do not read or write the cache
+      --no-mft           Do not read the NTFS master file table (Windows)
       --cache            Use the cache with --summary too (it scans fully by default)
       --summary          Scan, print the totals, and exit
   -h, --help             Print this help
@@ -66,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
             one_fs: false,
             threads: default_threads(),
             cache: true,
+            mft: true,
         },
         summary: false,
     };
@@ -76,6 +78,7 @@ fn parse_args() -> Result<Args, String> {
             Some("-x" | "--one-file-system") => args.opts.one_fs = true,
             Some("--summary") => args.summary = true,
             Some("--no-cache") => args.opts.cache = false,
+            Some("--no-mft") => args.opts.mft = false,
             Some("--cache") => cache_in_summary = true,
             Some("-t" | "--threads") => {
                 let n = it.next().and_then(|v| v.to_str()?.parse::<usize>().ok());
@@ -139,6 +142,7 @@ fn summary(args: Args) -> ExitCode {
             let t = tree.totals();
             let from = match scan.source {
                 Source::Scanned => "full scan".to_string(),
+                Source::MasterFileTable => "NTFS master file table".to_string(),
                 Source::Cached { listed, .. } => {
                     format!("cache, {listed} directories listed again")
                 }

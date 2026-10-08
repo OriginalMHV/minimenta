@@ -1,7 +1,7 @@
 //! Reads a whole directory with `GetFileInformationByHandleEx` and the
-//! `FileIdBothDirectoryInfo` class. One call returns the names, sizes,
-//! allocation sizes and file IDs of many entries, like `getattrlistbulk` on
-//! macOS. `FindFirstFileW` would not return the allocation size.
+//! `FileFullDirectoryInfo` class. One call returns the names, sizes and
+//! allocation sizes of many entries, like `getattrlistbulk` on macOS.
+//! `FindFirstFileW` would not return the allocation size.
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -11,13 +11,14 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_NO_MORE_FILES, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdBothDirectoryInfo, GetFileInformationByHandleEx,
-    OPEN_EXISTING,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
+    FileIdBothDirectoryInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
 };
 
 use super::{Ctx, NativePath, SubDir};
@@ -64,13 +65,22 @@ pub(super) fn read_dir(
     }
     let handle = Handle(handle);
 
+    // The full class leaves out the 8.3 short name, which NTFS may have to
+    // look up in the file record of every entry. File systems without the
+    // class get the class with file IDs and short names.
+    let mut full = true;
     BUF.with_borrow_mut(|buf| {
         loop {
+            let class = if full {
+                FileFullDirectoryInfo
+            } else {
+                FileIdBothDirectoryInfo
+            };
             // SAFETY: the buffer is writable and large enough for at least one record.
             let ok = unsafe {
                 GetFileInformationByHandleEx(
                     handle.0,
-                    FileIdBothDirectoryInfo,
+                    class,
                     buf.as_mut_ptr().cast(),
                     (buf.len() * size_of::<u64>()) as u32,
                 )
@@ -80,17 +90,52 @@ pub(super) fn read_dir(
                 if error == ERROR_NO_MORE_FILES {
                     return Ok(());
                 }
+                if full && error == ERROR_INVALID_PARAMETER && dir.entries.is_empty() {
+                    full = false;
+                    continue;
+                }
                 return Err(io::Error::from_raw_os_error(error as i32));
             }
             let base = buf.as_ptr().cast::<u8>();
             let mut offset = 0;
             loop {
-                // SAFETY: the call filled the buffer with records that are
-                // linked by NextEntryOffset, and the last one has offset 0.
+                // SAFETY: the call filled the buffer with records of `class`
+                // that are linked by NextEntryOffset, and the last one has
+                // offset 0.
                 unsafe {
-                    let info = base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>();
-                    add_entry(info, dir, subdirs);
-                    let next = ptr::addr_of!((*info).NextEntryOffset).read_unaligned();
+                    let next = if full {
+                        let info = base.add(offset).cast::<FILE_FULL_DIR_INFO>();
+                        let name = record_name(
+                            ptr::addr_of!((*info).FileName).cast(),
+                            ptr::addr_of!((*info).FileNameLength).read_unaligned(),
+                        );
+                        add_entry(
+                            name,
+                            ptr::addr_of!((*info).FileAttributes).read_unaligned(),
+                            ptr::addr_of!((*info).AllocationSize).read_unaligned(),
+                            ptr::addr_of!((*info).EndOfFile).read_unaligned(),
+                            0,
+                            dir,
+                            subdirs,
+                        );
+                        ptr::addr_of!((*info).NextEntryOffset).read_unaligned()
+                    } else {
+                        let info = base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>();
+                        let name = record_name(
+                            ptr::addr_of!((*info).FileName).cast(),
+                            ptr::addr_of!((*info).FileNameLength).read_unaligned(),
+                        );
+                        add_entry(
+                            name,
+                            ptr::addr_of!((*info).FileAttributes).read_unaligned(),
+                            ptr::addr_of!((*info).AllocationSize).read_unaligned(),
+                            ptr::addr_of!((*info).EndOfFile).read_unaligned(),
+                            ptr::addr_of!((*info).FileId).read_unaligned() as u64,
+                            dir,
+                            subdirs,
+                        );
+                        ptr::addr_of!((*info).NextEntryOffset).read_unaligned()
+                    };
                     if next == 0 {
                         break;
                     }
@@ -102,40 +147,43 @@ pub(super) fn read_dir(
 }
 
 /// # Safety
-/// `info` must point to a complete record written by the kernel.
-unsafe fn add_entry(info: *const FILE_ID_BOTH_DIR_INFO, dir: &mut Dir, subdirs: &mut Vec<SubDir>) {
-    unsafe {
-        let len = ptr::addr_of!((*info).FileNameLength).read_unaligned() as usize / 2;
-        let wide = std::slice::from_raw_parts(ptr::addr_of!((*info).FileName).cast::<u16>(), len);
-        if wide == [u16::from(b'.')] || wide == [u16::from(b'.'), u16::from(b'.')] {
-            return;
-        }
-        let name = OsString::from_wide(wide);
-        let name = name.as_encoded_bytes();
-        let attributes = ptr::addr_of!((*info).FileAttributes).read_unaligned();
-        let allocated = ptr::addr_of!((*info).AllocationSize)
-            .read_unaligned()
-            .max(0) as u64;
-        let size = ptr::addr_of!((*info).EndOfFile).read_unaligned().max(0) as u64;
-        let id = ptr::addr_of!((*info).FileId).read_unaligned() as u64;
+/// `name` must point to `bytes` bytes of UTF-16 inside a record.
+unsafe fn record_name<'a>(name: *const u16, bytes: u32) -> &'a [u16] {
+    unsafe { std::slice::from_raw_parts(name, bytes as usize / 2) }
+}
 
-        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            // Junctions, directory symlinks and mount points are never
-            // followed, like symlinks on the other platforms.
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                dir.push(name, Kind::Symlink, 0, 0, 0);
-            } else {
-                subdirs.push(SubDir {
-                    index: dir.entries.len(),
-                    expected: 0,
-                    ino: id,
-                });
-                dir.push(name, Kind::Dir, 0, 0, 0);
-            }
-            return;
-        }
-        // Files with a reparse tag, such as OneDrive placeholders, count with
-        // the space they really take, which is close to 0 when only in the cloud.
-        dir.push(name, Kind::File, allocated, size, 0);
+fn add_entry(
+    wide: &[u16],
+    attributes: u32,
+    allocated: i64,
+    size: i64,
+    id: u64,
+    dir: &mut Dir,
+    subdirs: &mut Vec<SubDir>,
+) {
+    if wide == [u16::from(b'.')] || wide == [u16::from(b'.'), u16::from(b'.')] {
+        return;
     }
+    let name = OsString::from_wide(wide);
+    let name = name.as_encoded_bytes();
+    let (allocated, size) = (allocated.max(0) as u64, size.max(0) as u64);
+
+    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        // Junctions, directory symlinks and mount points are never
+        // followed, like symlinks on the other platforms.
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            dir.push(name, Kind::Symlink, 0, 0, 0);
+        } else {
+            subdirs.push(SubDir {
+                index: dir.entries.len(),
+                expected: 0,
+                ino: id,
+            });
+            dir.push(name, Kind::Dir, 0, 0, 0);
+        }
+        return;
+    }
+    // Files with a reparse tag, such as OneDrive placeholders, count with
+    // the space they really take, which is close to 0 when only in the cloud.
+    dir.push(name, Kind::File, allocated, size, 0);
 }

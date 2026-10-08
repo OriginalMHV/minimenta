@@ -22,6 +22,8 @@ const MAX_DEPTH: usize = 1024;
 /// Where a result came from, so the interface can say so.
 pub enum Source {
     Scanned,
+    /// Read from the NTFS master file table (Windows, administrator).
+    MasterFileTable,
     /// `listed` counts the directories that changed since the last run.
     /// `age_secs` is the time since the last full scan.
     Cached {
@@ -75,9 +77,14 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
         save_in_background(header.clone(), &dir);
         Some(header)
     });
+    let source = if progress.mft.load(std::sync::atomic::Ordering::Relaxed) {
+        Source::MasterFileTable
+    } else {
+        Source::Scanned
+    };
     Ok(Scan {
         dir,
-        source: Source::Scanned,
+        source,
         session,
     })
 }
@@ -958,6 +965,7 @@ mod tests {
                 one_fs: false,
                 threads: 4,
                 cache: true,
+                mft: false,
             }
         }
 
