@@ -110,6 +110,9 @@ struct Ctx<'a> {
     one_fs: bool,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     root_dev: u64,
+    /// The scanned root. The macOS scanner counts firmlinks once.
+    #[cfg(target_os = "macos")]
+    root: &'a Path,
     progress: &'a Progress,
     hardlinks: Mutex<HashSet<(u64, u64)>>,
     /// Stops the scan without counting as a cancel, for example when another
@@ -232,6 +235,8 @@ fn list(
     let ctx = Ctx {
         one_fs: opts.one_fs,
         root_dev: dev_ino(meta).0,
+        #[cfg(target_os = "macos")]
+        root: path,
         progress,
         hardlinks: Mutex::default(),
         stop,
@@ -305,6 +310,8 @@ pub fn update(
     let ctx = Ctx {
         one_fs: opts.one_fs,
         root_dev: dev_ino(&meta).0,
+        #[cfg(target_os = "macos")]
+        root,
         progress,
         hardlinks: Mutex::default(),
         stop: &AtomicBool::new(false),
