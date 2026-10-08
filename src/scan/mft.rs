@@ -13,10 +13,10 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
 
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GetFileInformationByHandle, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
     GetVolumePathNameW, OPEN_EXISTING,
 };
@@ -113,8 +113,19 @@ pub(super) fn scan(root: &Path, threads: usize, progress: &Progress) -> io::Resu
     // Temporary timing printout to find the cost of each phase.
     let profile = std::env::var_os("MINIMENTA_PROFILE").is_some();
     let started = std::time::Instant::now();
+    // Temporary experiment: background priority lowers the CPU and I/O
+    // priority of the reader threads, so a racing listing comes first.
+    let background = std::env::var_os("MINIMENTA_MFT_BACKGROUND").is_some();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
+        .start_handler(move |_| {
+            if background {
+                use windows_sys::Win32::System::Threading::{
+                    GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+                };
+                unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
+            }
+        })
         .build()
         .map_err(io::Error::other)?;
     let parts: Vec<io::Result<Part>> = pool.install(|| {
@@ -215,9 +226,6 @@ fn open_volume(root: &Path) -> Option<File> {
         device.pop();
     }
     device.push(0);
-    if std::env::var_os("MINIMENTA_MFT_NOFLUSH").is_none() {
-        flush(&device);
-    }
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     // Unbuffered: the table goes straight into our aligned buffers, and does
     // not fill the file cache with data that is read once.
@@ -238,30 +246,6 @@ fn open_volume(root: &Path) -> Option<File> {
     }
     // SAFETY: the handle is valid and the File takes ownership of it.
     Some(unsafe { File::from_raw_handle(handle) })
-}
-
-/// Recently changed metadata may still be in memory. Flushing the volume
-/// writes it out, so the table on disk is current. It needs write access to
-/// the volume handle, but nothing is ever written through it.
-fn flush(device: &[u16]) {
-    let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    // SAFETY: `device` is NUL-terminated.
-    let handle = unsafe {
-        CreateFileW(
-            device.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            share,
-            ptr::null(),
-            OPEN_EXISTING,
-            0,
-            ptr::null_mut(),
-        )
-    };
-    if handle != INVALID_HANDLE_VALUE {
-        // SAFETY: the handle is valid and owned by the File, which closes it.
-        let volume = unsafe { File::from_raw_handle(handle) };
-        unsafe { FlushFileBuffers(volume.as_raw_handle()) };
-    }
 }
 
 /// The MFT record number of a directory: the low 48 bits of its file index.

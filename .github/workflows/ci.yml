@@ -97,8 +97,6 @@ jobs:
           python -I bench/gen_tree.py "$t/bench-tree"
           export GDU="$t/tools/gdu_windows_amd64.exe" DUA="$t/tools/dua.exe"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "-- MFT correctness without the volume flush" | tee -a "$GITHUB_STEP_SUMMARY"
-          for i in 1 2 3; do MINIMENTA_MFT_NOFLUSH=1 cargo test --release -q the_master_file_table 2>&1 | grep -E "test result|panicked|skipped" | tee -a "$GITHUB_STEP_SUMMARY"; done
           bench/windows-race.sh "$t/bench-tree" 30 0 | tee -a "$GITHUB_STEP_SUMMARY"
           bench/windows-race.sh "C:/Program Files" 10 3 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

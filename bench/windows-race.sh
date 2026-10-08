@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Experiment: tunes the race between the MFT reader and the listing.
+# Experiment: tunes the race between the MFT reader and the listing. Every
+# command starts through `env`, so the start-up cost of env.exe hits both
+# sides of a comparison equally.
 # Usage: bench/windows-race.sh TREE [WARM_PAIRS] [COLD_PAIRS]
 set -euo pipefail
 tree=$1
@@ -8,17 +10,16 @@ cold=${3:-3}
 bin=./target/release/minimenta.exe
 py=${PY:-python}
 purge="powershell -NoProfile -ExecutionPolicy Bypass -File bench/windows-purge.ps1"
-listing="$bin --summary --no-mft '$tree'"
+race="env MINIMENTA_UNUSED=1 $bin --summary '$tree'"
+background="env MINIMENTA_MFT_BACKGROUND=1 $bin --summary '$tree'"
+listing="env MINIMENTA_UNUSED=1 $bin --summary --no-mft '$tree'"
 cargo build --release -q
-for variant in "" "MINIMENTA_MFT_DELAY_MS=250" "MINIMENTA_MFT_THREADS=2" \
-    "MINIMENTA_MFT_DELAY_MS=250 MINIMENTA_MFT_THREADS=2" \
-    "MINIMENTA_MFT_DELAY_MS=250 MINIMENTA_MFT_THREADS=2 MINIMENTA_MFT_NOFLUSH=1"; do
-  echo "-- warm: A = race [${variant:-defaults}], B = --no-mft"
-  $py -I bench/interleave.py "$warm" "env $variant $bin --summary '$tree'" "$listing"
-done
+echo "-- warm: A = race, B = --no-mft"
+$py -I bench/interleave.py "$warm" "$race" "$listing"
+echo "-- warm: A = race with background MFT threads, B = --no-mft"
+$py -I bench/interleave.py "$warm" "$background" "$listing"
 [ "$cold" -gt 0 ] || exit 0
-best="MINIMENTA_MFT_DELAY_MS=250 MINIMENTA_MFT_THREADS=2"
-echo "-- cold: A = race [$best], B = --no-mft"
-$py -I bench/interleave.py --prepare "$purge" "$cold" "env $best $bin --summary '$tree'" "$listing"
-echo "-- cold: A = race [$best], B = race [defaults]"
-$py -I bench/interleave.py --prepare "$purge" "$cold" "env $best $bin --summary '$tree'" "$bin --summary '$tree'"
+echo "-- cold: A = race, B = --no-mft"
+$py -I bench/interleave.py --prepare "$purge" "$cold" "$race" "$listing"
+echo "-- cold: A = race with background MFT threads, B = race"
+$py -I bench/interleave.py --prepare "$purge" "$cold" "$background" "$race"
