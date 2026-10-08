@@ -24,19 +24,30 @@ pub fn move_to_trash(paths: &[PathBuf]) -> (Vec<Trashed>, Result<(), String>) {
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
+    // The Trash keeps the resolved folder, for example the long form of an
+    // 8.3 name on Windows, so compare resolved folders and names.
+    let resolve = |folder: &Path| std::fs::canonicalize(folder).ok();
+    let wanted: Vec<_> = paths
+        .iter()
+        .map(|path| Some((path.parent().and_then(resolve)?, path.file_name()?)))
+        .collect();
     let result = trash::delete_all(paths).map_err(|e| e.to_string());
-    // The Trash keeps where each item came from. Find the items moved just
-    // now, the newest first for a path that was moved before too.
+    // Find the items moved just now, the newest first for a path that was
+    // moved before too.
     let mut listed = trash::os_limited::list().unwrap_or_default();
     listed.retain(|item| item.time_deleted >= started - 1);
     listed.sort_by_key(|item| std::cmp::Reverse(item.time_deleted));
     let trashed = paths
         .iter()
-        .filter(|path| path.symlink_metadata().is_err())
-        .filter_map(|path| {
+        .zip(wanted)
+        .filter(|(path, _)| path.symlink_metadata().is_err())
+        .filter_map(|(path, wanted)| {
+            let (folder, name) = wanted?;
             let item = listed
                 .iter()
-                .find(|item| item.original_path() == *path)?
+                .find(|item| {
+                    item.name == name && resolve(&item.original_parent).as_ref() == Some(&folder)
+                })?
                 .clone();
             Some(Trashed {
                 original: path.clone(),
