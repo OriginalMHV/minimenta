@@ -63,22 +63,7 @@ pub fn run(
     source: &Source,
     session: Option<Header>,
 ) -> io::Result<()> {
-    let mut browser = Browser {
-        tree,
-        stack: Vec::new(),
-        cursor: 0,
-        offset: 0,
-        sort: Sort::default(),
-        mode: Mode::Browse,
-        message: describe(source),
-        list_height: 1,
-        range: None,
-        opts,
-        session,
-        changed: false,
-        undo: Vec::new(),
-    };
-    browser.apply_sort();
+    let mut browser = Browser::new(tree, opts, source, session);
     let result = browser.event_loop(terminal);
     // Without this, the next run would load the stale tree again.
     if browser.changed
@@ -92,6 +77,26 @@ pub fn run(
 }
 
 impl Browser {
+    fn new(tree: Tree, opts: Options, source: &Source, session: Option<Header>) -> Self {
+        let mut browser = Browser {
+            tree,
+            stack: Vec::new(),
+            cursor: 0,
+            offset: 0,
+            sort: Sort::default(),
+            mode: Mode::Browse,
+            message: describe(source),
+            list_height: 1,
+            range: None,
+            opts,
+            session,
+            changed: false,
+            undo: Vec::new(),
+        };
+        browser.apply_sort();
+        browser
+    }
+
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
             terminal.draw(|frame| view::draw(frame, self))?;
@@ -256,9 +261,12 @@ impl Browser {
         {
             self.clear_selection();
             self.stack.push(cursor);
-            self.cursor = 0;
             self.offset = 0;
+            // A folder opened for the first time is still in disk order, and
+            // the sort keeps the cursor on its entry. So sort first, then put
+            // the cursor on the first row.
             self.apply_sort();
+            self.cursor = 0;
         }
     }
 
@@ -436,23 +444,36 @@ impl Browser {
         };
         match progress::scan(terminal, &path, opts)? {
             Outcome::Done(fresh) => {
-                *self.tree.dir_at_mut(&self.stack) = fresh.dir;
-                self.tree.refresh_totals(&self.stack);
+                self.replace_current(fresh.dir);
                 self.changed = true;
                 if self.stack.is_empty()
                     && let Some(session) = &mut self.session
                 {
                     session.full_scan_at = cache::now();
                 }
-                self.range = None;
-                self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
-                self.resort();
                 self.message = Some("Rescanned".into());
             }
             Outcome::Failed(e) => self.message = Some(format!("Rescan failed: {e}")),
             Outcome::Cancelled | Outcome::Quit => self.message = Some("Rescan cancelled".into()),
         }
         Ok(())
+    }
+
+    /// Puts a fresh listing in place of the current directory. The cursor
+    /// stays on the entry with the same name, because the fresh listing is in
+    /// disk order and its indices mean nothing for the old rows.
+    fn replace_current(&mut self, fresh: Dir) {
+        let (sort, cursor) = (self.sort, self.cursor);
+        let dir = self.dir();
+        let name = dir.entries.get(cursor).map(|e| dir.name(e).to_vec());
+        *self.tree.dir_at_mut(&self.stack) = fresh;
+        self.tree.refresh_totals(&self.stack);
+        self.range = None;
+        let dir = self.tree.dir_at_mut(&self.stack);
+        dir.sort(sort);
+        self.cursor = name
+            .and_then(|name| dir.find(&name))
+            .unwrap_or_else(|| cursor.min(dir.entries.len().saturating_sub(1)));
     }
 }
 
@@ -518,6 +539,68 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::Kind;
+
+    /// Three files in disk order. Sorted by size, `large` comes first.
+    fn in_disk_order() -> Dir {
+        let mut dir = Dir::default();
+        dir.push(b"small", Kind::File, 4096, 4096, 0);
+        dir.push(b"large", Kind::File, 1 << 20, 1 << 20, 0);
+        dir.push(b"middle", Kind::File, 1 << 16, 1 << 16, 0);
+        dir
+    }
+
+    /// A browser on a root with one folder that was never opened.
+    fn browser_with(folder: Dir) -> Browser {
+        let mut root = Dir::default();
+        root.push(b"folder", Kind::Dir, 0, 0, 0);
+        root.attach(0, folder, 0);
+        let tree = Tree {
+            path: PathBuf::from("/root"),
+            dir: Box::new(root),
+        };
+        let opts = Options {
+            one_fs: false,
+            threads: 1,
+            cache: false,
+            mft: false,
+        };
+        Browser::new(tree, opts, &Source::Scanned, None)
+    }
+
+    fn name_at_cursor(browser: &Browser) -> &[u8] {
+        let dir = browser.dir();
+        dir.name(&dir.entries[browser.cursor])
+    }
+
+    #[test]
+    fn opening_a_folder_for_the_first_time_puts_the_cursor_on_the_top_row() {
+        let mut browser = browser_with(in_disk_order());
+        browser.open();
+        assert_eq!(browser.cursor, 0);
+        assert_eq!(name_at_cursor(&browser), b"large");
+    }
+
+    #[test]
+    fn a_rescan_keeps_the_cursor_on_the_same_name() {
+        let mut browser = browser_with(in_disk_order());
+        browser.open();
+        browser.move_cursor(1, false);
+        assert_eq!(name_at_cursor(&browser), b"middle");
+        browser.replace_current(in_disk_order());
+        assert_eq!(name_at_cursor(&browser), b"middle");
+    }
+
+    #[test]
+    fn a_rescan_keeps_the_cursor_in_range_when_its_entry_is_gone() {
+        let mut browser = browser_with(in_disk_order());
+        browser.open();
+        browser.move_cursor(2, false);
+        let mut fresh = Dir::default();
+        fresh.push(b"large", Kind::File, 1 << 20, 1 << 20, 0);
+        browser.replace_current(fresh);
+        assert_eq!(name_at_cursor(&browser), b"large");
+    }
 
     #[test]
     fn the_status_line_suggests_an_elevated_run_only_when_it_helps() {
