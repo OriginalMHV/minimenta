@@ -24,6 +24,9 @@ pub enum Source {
     Scanned,
     /// Read from the NTFS master file table (Windows, administrator).
     MasterFileTable,
+    /// A slow full scan that an elevated run could have read from the NTFS
+    /// master file table (Windows, administrator without elevation).
+    ScannedNotElevated,
     /// `listed` counts the directories that changed since the last run.
     /// `age_secs` is the time since the last full scan.
     Cached {
@@ -31,6 +34,9 @@ pub enum Source {
         age_secs: u64,
     },
 }
+
+/// Shown after a `ScannedNotElevated` scan.
+pub const ELEVATE_HINT: &str = "Run as administrator to read the NTFS master file table, which is often several times faster on a cold disk.";
 
 pub struct Scan {
     pub dir: Dir,
@@ -79,6 +85,8 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     });
     let source = if progress.mft.load(std::sync::atomic::Ordering::Relaxed) {
         Source::MasterFileTable
+    } else if progress.elevate.load(std::sync::atomic::Ordering::Relaxed) {
+        Source::ScannedNotElevated
     } else {
         Source::Scanned
     };
@@ -810,6 +818,21 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::tree::Sort;
+
+    #[test]
+    fn a_scan_that_an_elevated_run_could_speed_up_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = Options {
+            one_fs: false,
+            threads: 2,
+            cache: false,
+            mft: false,
+        };
+        let progress = Progress::default();
+        progress.elevate.store(true, Ordering::Relaxed);
+        let scan = scan(tmp.path(), &opts, &progress).unwrap();
+        assert!(matches!(scan.source, Source::ScannedNotElevated));
+    }
 
     fn sample() -> (Header, Dir) {
         let mut sub = Dir {

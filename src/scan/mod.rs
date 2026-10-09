@@ -101,6 +101,10 @@ pub struct Progress {
     pub cancel: AtomicBool,
     /// Set when the scan read the NTFS master file table.
     pub mft: AtomicBool,
+    /// Set when a listing took several seconds without the NTFS master file
+    /// table, but the same user could run minimenta as administrator to read
+    /// it (Windows).
+    pub elevate: AtomicBool,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device
@@ -156,9 +160,10 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
 /// Windows runner, a warm listing of `C:\Program Files` ran at about 460,000
 /// items/s and a cold one at about 18,000 items/s. Not starting the reader on
 /// a large cold folder costs 3x to 5x. Starting it costs about 20% on a warm
-/// disk, and up to 2x on a cold folder that the listing alone finishes within
+/// disk, and up to 3x on a cold folder that the listing alone finishes within
 /// a few seconds, because both then compete for the disk: a cold folder with
-/// 32,000 items took 1.9 s with the listing alone and 3.9 s in the race.
+/// 32,000 items took 1.2 s to 1.9 s with the listing alone and 3.6 s to 3.9 s
+/// in the race.
 #[cfg(windows)]
 const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(windows)]
@@ -177,9 +182,11 @@ const MFT_EARLY_RATE: f64 = 40_000.0;
 /// thousands of small reads.
 #[cfg(windows)]
 fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
+    let start = std::time::Instant::now();
     let stop_listing = AtomicBool::new(false);
     let mft_progress = Progress::default();
-    std::thread::scope(|s| {
+    let elevation_helps = AtomicBool::new(false);
+    let result = std::thread::scope(|s| {
         let reader = s.spawn(|| {
             if !wait_for_slow_listing(progress, &mft_progress.cancel) {
                 return Ok(None);
@@ -187,6 +194,8 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
             let result = mft::scan(path, opts.threads, &mft_progress);
             if matches!(result, Ok(Some(_))) {
                 stop_listing.store(true, Relaxed);
+            } else if mft::elevation_helps(path) {
+                elevation_helps.store(true, Relaxed);
             }
             result
         });
@@ -207,7 +216,27 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
         mft_progress.cancel.store(true, Relaxed);
         waiting.unpark();
         listed
-    })
+    });
+    if !progress.mft.load(Relaxed)
+        && suggest_elevation(elevation_helps.load(Relaxed), start.elapsed())
+    {
+        progress.elevate.store(true, Relaxed);
+    }
+    result
+}
+
+/// The MFT read alone took about 3 s to 4 s on the runner, for a 1.3 GB table.
+/// A listing that took longer than this floor could have been faster with
+/// the MFT, so only then is an elevated run worth a hint.
+#[cfg(windows)]
+const ELEVATE_HINT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether to suggest an elevated run after a listing that took `took`.
+/// `elevation_helps` says that the MFT reader could not run and that an
+/// elevated run could read the MFT.
+#[cfg(windows)]
+fn suggest_elevation(elevation_helps: bool, took: std::time::Duration) -> bool {
+    elevation_helps && took >= ELEVATE_HINT_AFTER
 }
 
 /// Decides from samples of the listed item count whether the listing is
@@ -827,6 +856,18 @@ mod tests {
             &Progress::default(),
             &AtomicBool::new(true)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_long_listing_suggests_an_elevated_run() {
+        let ms = std::time::Duration::from_millis;
+        assert!(suggest_elevation(true, ms(6_000)));
+        assert!(
+            !suggest_elevation(true, ms(400)),
+            "the MFT could not win against a short listing"
+        );
+        assert!(!suggest_elevation(false, ms(60_000)));
     }
 
     #[test]
