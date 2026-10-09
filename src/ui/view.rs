@@ -305,7 +305,12 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         lines.push(Line::from(format!("   … and {} more", targets.len() - shown)).dark_gray());
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(" y yes   any other key: no").dark_gray());
+    let keys = if permanent {
+        " y yes   any other key: no"
+    } else {
+        " y or Enter: yes   any other key: no"
+    };
+    lines.push(Line::from(keys).dark_gray());
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
