@@ -73,6 +73,8 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ## Benchmarks
 
+Before you try a performance idea, read [docs/experiments.md](docs/experiments.md). It lists what we tried, what worked, and what we dropped, with the evidence. Add a row to it for every experiment you run, kept or dropped, in the same pull request or in a docs pull request right after.
+
 minimenta aims to be fast, so a speed claim needs a fair measurement. Follow these rules for each number you put in a pull request, an issue, or the README:
 
 1. **Run the two commands in alternating pairs.** Use [`bench/interleave.py`](bench/interleave.py). It swaps the order in every pair and reports the median of the time ratios. A machine that slows down for a while then slows both commands.
@@ -96,7 +98,7 @@ The CI benchmark jobs run on GitHub runners without endpoint security. Use them 
 | `src/cache.rs`, `src/fsevents.rs` | The scan cache and FSEvents (macOS) |
 | `src/tree.rs` | The tree of directories and entries |
 | `bench/` | The benchmark scripts |
-| `docs/` | The images for the README and the demo recording |
+| `docs/` | The images for the README, the demo recording, and the [log of performance experiments](docs/experiments.md) |
 
 ## Releases
 
