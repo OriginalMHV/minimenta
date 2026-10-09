@@ -38,7 +38,10 @@ mod generic;
 ))]
 use generic as platform;
 
-// The NTFS parser has no platform calls, so its tests run everywhere.
+// The NTFS parser and the start decision of the MFT reader have no platform
+// calls, so their tests run everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod mft_start;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod ntfs;
 
@@ -178,32 +181,20 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
     list(path, opts, progress, &meta, &AtomicBool::new(false))
 }
 
-/// The MFT reader starts when the listing is slow: below `MFT_EARLY_RATE`
-/// items/s over its first `MFT_EARLY`, or below `MFT_START_RATE` items/s over
-/// a later `MFT_WINDOW`. The first full window counts from the start. On the
-/// Windows runner, a warm listing of `C:\Program Files` ran at about 460,000
-/// items/s and a cold one at about 18,000 items/s. Not starting the reader on
-/// a large cold folder costs 3x to 5x. Starting it costs about 20% on a warm
-/// disk, and up to 3x on a cold folder that the listing alone finishes within
-/// a few seconds, because both then compete for the disk: a cold folder with
-/// 32,000 items took 1.2 s to 1.9 s with the listing alone and 3.6 s to 3.9 s
-/// in the race.
-#[cfg(windows)]
-const MFT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
-#[cfg(windows)]
-const MFT_START_RATE: f64 = 150_000.0;
-/// On the runner, cold listings of `C:\Program Files` had 600 to 1,400 items
-/// after 50 ms, and warm ones about 36,000 after 70 ms.
-#[cfg(windows)]
-const MFT_EARLY: std::time::Duration = std::time::Duration::from_millis(50);
-#[cfg(windows)]
-const MFT_EARLY_RATE: f64 = 40_000.0;
-
 /// Starts the MFT reader next to the directory listing and keeps the result
 /// that finishes first. The MFT reader must read the table of the whole
 /// volume (about 3 s for a 1.3 GB table), so a listing wins for small or warm
 /// folders, and the MFT wins on a cold disk, where a listing waits for
 /// thousands of small reads.
+///
+/// The reader starts at once for a scan of a whole volume, where it always
+/// wins. For a folder it starts only after `mft_start::FOLDER_DELAY`, and
+/// only while the listing is still slow. Both then compete for the disk, so a
+/// cold folder that the listing finishes within a few seconds must not pay for
+/// the reader: a cold folder with 32,000 items took 1.2 s to 2.7 s with the
+/// listing alone and 3.6 s to 4.0 s in an immediate race. A large cold folder
+/// pays the delay: the immediate race read `C:\Program Files` in about 4.2 s
+/// where the listing alone took 12 s to 20 s.
 #[cfg(windows)]
 fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
     let start = std::time::Instant::now();
@@ -212,7 +203,13 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
     let elevation_helps = AtomicBool::new(false);
     let result = std::thread::scope(|s| {
         let reader = s.spawn(|| {
-            if !wait_for_slow_listing(progress, &mft_progress.cancel) {
+            let volume_root = mft::is_volume_root(path);
+            if !mft_start::wait(
+                progress,
+                &mft_progress.cancel,
+                volume_root,
+                mft_start::FOLDER_DELAY,
+            ) {
                 return Ok(None);
             }
             let result = mft::scan(path, opts.threads, &mft_progress);
@@ -261,69 +258,6 @@ const ELEVATE_HINT_AFTER: std::time::Duration = std::time::Duration::from_secs(5
 #[cfg(windows)]
 fn suggest_elevation(elevation_helps: bool, took: std::time::Duration) -> bool {
     elevation_helps && took >= ELEVATE_HINT_AFTER
-}
-
-/// Decides from samples of the listed item count whether the listing is
-/// slow, with the windows and rates above.
-#[cfg(windows)]
-struct RateCheck {
-    /// Time and item count at the start of the current window.
-    from: (std::time::Instant, u64),
-    early: bool,
-}
-
-#[cfg(windows)]
-impl RateCheck {
-    fn new(start: std::time::Instant) -> Self {
-        RateCheck {
-            from: (start, 0),
-            early: true,
-        }
-    }
-
-    fn window(&self) -> std::time::Duration {
-        if self.early { MFT_EARLY } else { MFT_WINDOW }
-    }
-
-    /// Whether the listing is slow at `now` with `items` listed. Before the
-    /// current window has passed, it is not.
-    fn is_slow(&mut self, now: std::time::Instant, items: u64) -> bool {
-        let threshold = if self.early {
-            MFT_EARLY_RATE
-        } else {
-            MFT_START_RATE
-        };
-        let elapsed = now.saturating_duration_since(self.from.0);
-        if elapsed < self.window() {
-            return false;
-        }
-        let rate = items.saturating_sub(self.from.1) as f64 / elapsed.as_secs_f64();
-        if rate < threshold {
-            return true;
-        }
-        if !self.early {
-            self.from = (now, items);
-        }
-        self.early = false;
-        false
-    }
-}
-
-/// Waits until the listing is slow, and returns false when `done` is set
-/// first. Small folders finish, and warm ones list fast enough, so they pay
-/// nothing for the race.
-#[cfg(windows)]
-fn wait_for_slow_listing(progress: &Progress, done: &AtomicBool) -> bool {
-    let mut check = RateCheck::new(std::time::Instant::now());
-    loop {
-        std::thread::park_timeout(check.window());
-        if done.load(Relaxed) {
-            return false;
-        }
-        if check.is_slow(std::time::Instant::now(), progress.items.load(Relaxed)) {
-            return true;
-        }
-    }
 }
 
 fn list(
@@ -861,44 +795,6 @@ mod tests {
         assert_eq!(via_link.totals(), direct.totals());
         assert_eq!(via_link.totals().apparent, 3000);
         assert_eq!(via_link.totals().items, 2);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_mft_reader_starts_early_for_a_clearly_cold_listing() {
-        let start = std::time::Instant::now();
-        let at = |ms| start + std::time::Duration::from_millis(ms);
-        let mut check = RateCheck::new(start);
-        assert!(!check.is_slow(at(10), 0), "the first window has not passed");
-        // 1,000 items in 50 ms is 20,000 items/s.
-        assert!(check.is_slow(at(50), 1_000));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_mft_reader_waits_for_a_full_window_after_a_fast_start() {
-        let start = std::time::Instant::now();
-        let at = |ms| start + std::time::Duration::from_millis(ms);
-        let mut check = RateCheck::new(start);
-        // 400,000 items/s, then 200,000 items/s over the first full window.
-        assert!(!check.is_slow(at(50), 20_000));
-        assert!(!check.is_slow(at(300), 60_000));
-        assert!(!check.is_slow(at(400), 60_000), "the window has not passed");
-        // 10,000 items in the next 300 ms is about 33,000 items/s.
-        assert!(check.is_slow(at(600), 70_000));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_stalled_listing_starts_the_mft_reader_and_a_finished_one_never_does() {
-        assert!(wait_for_slow_listing(
-            &Progress::default(),
-            &AtomicBool::new(false)
-        ));
-        assert!(!wait_for_slow_listing(
-            &Progress::default(),
-            &AtomicBool::new(true)
-        ));
     }
 
     #[cfg(windows)]

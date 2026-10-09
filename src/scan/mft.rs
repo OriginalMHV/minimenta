@@ -166,15 +166,20 @@ fn until_nul(buf: &[u16]) -> &[u16] {
     &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())]
 }
 
-/// The mount point of the volume that holds `root`, NUL-terminated, when
-/// that volume is NTFS.
-fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
-    // The volume functions do not accept the `\\?\` prefix of canonical paths.
+/// `root` as the volume functions need it: without the `\\?\` prefix of
+/// canonical paths, which they do not accept, and NUL-terminated.
+fn volume_query(root: &Path) -> Vec<u16> {
     let plain = root
         .to_str()
         .and_then(|s| s.strip_prefix(r"\\?\"))
         .filter(|s| !s.starts_with("UNC\\"));
-    let root = wide(plain.map_or(root, Path::new));
+    wide(plain.map_or(root, Path::new))
+}
+
+/// The mount point of the volume that holds `root`, NUL-terminated, when
+/// that volume is NTFS.
+fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
+    let root = volume_query(root);
     let mut mount = [0u16; 1024];
     let mut fs_name = [0u16; 64];
     // SAFETY: every buffer is NUL-terminated or has its length passed along.
@@ -192,6 +197,27 @@ fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
             ) != 0
     };
     (ok && until_nul(&fs_name) == "NTFS".encode_utf16().collect::<Vec<_>>()).then_some(mount)
+}
+
+/// Whether `root` is the top folder of an NTFS volume: a drive root such as
+/// `C:\`, or a volume that is mounted in a folder. The MFT reader always wins
+/// a scan of such a root.
+pub(super) fn is_volume_root(root: &Path) -> bool {
+    ntfs_mount_point(root)
+        .is_some_and(|mount| same_folder(until_nul(&mount), until_nul(&volume_query(root))))
+}
+
+/// Whether two Windows paths name the same folder when they differ at most in
+/// case and in trailing separators. The mount point from `GetVolumePathNameW`
+/// ends in a backslash, and a canonical path does not.
+fn same_folder(a: &[u16], b: &[u16]) -> bool {
+    fn folded(path: &[u16]) -> Vec<char> {
+        let path = path.strip_suffix(&[u16::from(b'\\')]).unwrap_or(path);
+        char::decode_utf16(path.iter().copied())
+            .flat_map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER).to_lowercase())
+            .collect()
+    }
+    folded(a) == folded(b)
 }
 
 /// Whether running minimenta elevated would let it read the MFT of the
@@ -401,6 +427,37 @@ mod tests {
         assert!(
             link_flags.contains(&(crate::tree::flag::MULTI_LINK | crate::tree::flag::HARDLINK))
         );
+    }
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn mount_points_match_paths_in_case_and_trailing_separator() {
+        let same = |a: &str, b: &str| same_folder(&utf16(a), &utf16(b));
+        assert!(same(r"C:\", "C:"));
+        assert!(same(r"C:\", r"c:\"));
+        assert!(same(r"C:\Mnt\Data\", r"c:\mnt\data"));
+        assert!(same(r"D:\Mnt\Å\", r"d:\mnt\å"));
+        assert!(!same(r"C:\", r"C:\Windows"));
+        assert!(!same(r"C:\Mnt\Data\", r"C:\Mnt"));
+        assert!(!same(r"C:\", r"D:\"));
+    }
+
+    #[test]
+    fn a_drive_root_is_a_volume_root_and_a_folder_is_not() {
+        let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let drive = system.ancestors().last().unwrap();
+        assert!(on_ntfs(drive));
+        assert!(is_volume_root(drive), "{drive:?}");
+        let drive = fs::canonicalize(drive).unwrap();
+        assert!(is_volume_root(&drive), "{drive:?}");
+        let windows = fs::canonicalize(&system).unwrap();
+        assert!(!is_volume_root(&windows), "{windows:?}");
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = fs::canonicalize(tmp.path()).unwrap();
+        assert!(!is_volume_root(&folder), "{folder:?}");
     }
 
     #[test]
