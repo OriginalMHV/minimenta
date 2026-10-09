@@ -2,7 +2,7 @@
 
 Usage:
     gh run download RUN_ID -n speed-merged -D DIR
-    python3 -I bench/speed_chart.py [--check] DIR/speed-merged.json [DIR2/speed-merged.json ...]
+    python3 -I bench/speed_chart.py [--check] [--svg FILE] [--readme FILE] DIR/speed-merged.json [DIR2/speed-merged.json ...]
 
 Download the artifact of each run into its own directory, then pass every
 speed-merged.json file. The script writes two outputs:
@@ -25,8 +25,9 @@ How the chart values come from the data:
 5. With several runs, the value is the median of the values of the runs.
 6. The chart shows one decimal. An exact tie rounds against minimenta: the value of
    minimenta rounds down and the value of every other tool rounds up.
-7. A bar has a number of # characters in proportion to the shown value. The longest
-   bar fills the bracket. All bars use one scale.
+7. A bar has 24 characters at most. Its number of # characters is the shown value divided
+   by the longest shown value, times 24, rounded and at least 1. The longest bar fills
+   the bracket. All bars use one scale.
 
 In the tables, a tie rounds down for the ratio and for the bounds of the middle
 half, and in the direction that is worse for minimenta for times. With several
@@ -35,10 +36,12 @@ runs, a table value is the median of the values of the runs, and the pairs add u
 
 import argparse
 import json
+import os
 import sys
 from fractions import Fraction
 from xml.sax.saxutils import escape
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BEGIN = "<!-- speed-tables:begin -->"
 END = "<!-- speed-tables:end -->"
 PLATFORMS = (("macos", "macOS"), ("linux", "Linux"), ("windows", "Windows"))
@@ -54,6 +57,7 @@ CHART_LABELS = {
 CELLS = 24
 HALF = Fraction(1, 2)
 DOWN, UP = "down", "up"
+NBSP = "\u00a0"
 
 WIDTH = 760
 MARGIN = 40
@@ -331,18 +335,16 @@ def md_table(header, rows, align=None):
 
 def time_text(ms, mode, ties):
     if mode == "cold":
-        return f"{fixed(ms / 1000, 2, ties)} s"
-    return f"{fixed(ms, 1, ties)} ms"
+        return f"{fixed(ms / 1000, 2, ties)}{NBSP}s"
+    return f"{fixed(ms, 1, ties)}{NBSP}ms"
 
 
 def verdict_text(series, ratio, q1, q3):
-    label = series.first["label"]
-    variant = series.first["tool"].startswith("minimenta")
     if q1 <= 1 <= q3:
         return "even"
     if ratio > 1:
-        return "default scan faster" if variant else "minimenta faster"
-    return f"{label} faster"
+        return "default scan" if series.first["tool"].startswith("minimenta") else "minimenta"
+    return series.first["label"]
 
 
 def runs_table(runs):
@@ -355,22 +357,22 @@ def runs_table(runs):
             repo = info.get("repository", "OriginalMHV/minimenta")
             head = run.doc.get("pull_request_head") or run.doc.get("commit") or ""
             runner = info["runner"]
-            admin = ("yes" if runner.get("elevated") else "no") if platform == "windows" else "n/a"
+            where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
             rows.append(
                 [
                     f"[{run.id}](https://github.com/{repo}/actions/runs/{run.id})",
                     run.date,
                     f"[`{head[:7]}`](https://github.com/{repo}/commit/{head})" if head else "n/a",
-                    name,
+                    where,
                     runner["cpu"].replace("|", "/"),
                     str(runner["cores"]),
-                    admin,
                 ]
             )
     lines = ["**Runs**", ""]
-    lines += md_table(["Run", "Date", "Measured commit", "Platform", "Runner CPU", "Cores", "Administrator"], rows, ["---", "---", "---", "---", "---", "---:", "---"])
+    lines += md_table(["Run", "Date", "Commit", "Platform", "Runner CPU", "Cores"], rows, ["---", "---", "---", "---", "---", "---:"])
+    lines += ["", "Times are medians. Pairs shows all pairs, then the pairs in which minimenta was faster and the pairs in which the tool was faster. Speed is the value of the chart."]
     if any(run.doc.get("pull_request_head") for run in runs):
-        lines += ["", "The measured commit of a pull request is the head of the pull request."]
+        lines += ["The commit of a pull request run is the head of the pull request."]
     return lines
 
 
@@ -399,10 +401,10 @@ def tree_table(runs, key, name, chart_keys):
         intro.append("From bench/gen_tree.py")
     lines.append(". ".join(intro) + ".")
     lines.append("")
-    header = ["Tool", "Version", "Tool median", "minimenta median", "Ratio", "Middle half", "Pairs (minimenta faster / tool faster)", "Result"]
+    header = ["Tool", "Version", "Tool time", "minimenta time", "Ratio", "Middle half", "Pairs", "Faster"]
     align = ["---", "---", "---:", "---:", "---:", "---", "---", "---"]
     if speed:
-        header.append("Speed vs baseline")
+        header.append("Speed")
         align.append("---:")
     rows = []
     for tool, each in series.items():
@@ -418,15 +420,15 @@ def tree_table(runs, key, name, chart_keys):
             time_text(each.median("median_ms"), mode, DOWN),
             time_text(each.median("minimenta_median_ms"), mode, UP),
             fixed(ratio, 3, DOWN),
-            f"{fixed(q1, 2, DOWN)} to {fixed(q3, 2, DOWN)}",
-            f"{each.total('pairs')} ({each.total('minimenta_faster_pairs')} / {each.total('tool_faster_pairs')})",
+            f"{fixed(q1, 2, DOWN)}{NBSP}to{NBSP}{fixed(q3, 2, DOWN)}",
+            f"{each.total('pairs')}{NBSP}({each.total('minimenta_faster_pairs')}{NBSP}/{NBSP}{each.total('tool_faster_pairs')})",
             verdict_text(each, ratio, q1, q3),
         ]
         if speed:
             if each.first["diagnostic"]:
                 row.append("n/a")
             else:
-                row.append(f"{fixed(speed[tool], 1, UP)}x" + (" (baseline)" if tool == baseline else ""))
+                row.append(f"{fixed(speed[tool], 1, UP)}x")
         rows.append(row)
     lines += md_table(header, rows, align)
     if speed:
@@ -501,8 +503,8 @@ def summary(blocks, runs):
 def main():
     parser = argparse.ArgumentParser(description="Draws the speed chart and the speed tables from speed-merged.json files.")
     parser.add_argument("files", nargs="+", metavar="speed-merged.json")
-    parser.add_argument("--svg", default="docs/assets/speed.svg")
-    parser.add_argument("--readme", default="README.md")
+    parser.add_argument("--svg", default=os.path.join(ROOT, "docs", "assets", "speed.svg"), help="default: docs/assets/speed.svg")
+    parser.add_argument("--readme", default=os.path.join(ROOT, "README.md"), help="default: README.md")
     parser.add_argument("--check", action="store_true", help="write nothing, exit 1 when an output differs")
     args = parser.parse_args()
     runs = load(args.files)

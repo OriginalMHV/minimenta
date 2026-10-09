@@ -103,25 +103,26 @@ The chart shows a speed relative to a baseline. The baseline is ncdu with its de
 
 **Runs**
 
-| Run | Date | Measured commit | Platform | Runner CPU | Cores | Administrator |
-| --- | --- | --- | --- | --- | ---: | --- |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | macOS | Apple M1 (Virtual) | 3 | n/a |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Linux | AMD EPYC 7763 64-Core Processor | 4 | n/a |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Windows | AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD | 4 | yes |
+| Run | Date | Commit | Platform | Runner CPU | Cores |
+| --- | --- | --- | --- | --- | ---: |
+| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | macOS | Apple M1 (Virtual) | 3 |
+| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Linux | AMD EPYC 7763 64-Core Processor | 4 |
+| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Windows, administrator | AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD | 4 |
 
-The measured commit of a pull request is the head of the pull request.
+Times are medians. Pairs shows all pairs, then the pairs in which minimenta was faster and the pairs in which the tool was faster. Speed is the value of the chart.
+The commit of a pull request run is the head of the pull request.
 
 **First scan of a cold disk, macOS, `/opt/homebrew`**
 
 200,140 items. The speed value is relative to ncdu (defaults). This tree is in the chart.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result | Speed vs baseline |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster | Speed |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: |
-| ncdu (defaults) | 2.9.2 | 4.60 s | 1.04 s | 4.425 | 3.93 to 5.32 | 15 (15 / 0) | minimenta faster | 1.0x (baseline) |
-| ncdu -t 64 | 2.9.2 | 2.02 s | 1.09 s | 1.674 | 1.39 to 2.07 | 15 (14 / 1) | minimenta faster | 2.6x |
-| gdu | 5.38.0 | 3.01 s | 1.03 s | 2.545 | 2.19 to 3.31 | 15 (15 / 0) | minimenta faster | 1.7x |
-| dua-cli | 2.45.1 | 1.64 s | 0.97 s | 1.697 | 1.26 to 2.09 | 15 (14 / 1) | minimenta faster | 2.6x |
-| dust | 1.2.6 | 3.07 s | 1.08 s | 2.771 | 2.34 to 4.06 | 15 (15 / 0) | minimenta faster | 1.6x |
+| ncdu (defaults) | 2.9.2 | 4.60 s | 1.04 s | 4.425 | 3.93 to 5.32 | 15 (15 / 0) | minimenta | 1.0x |
+| ncdu -t 64 | 2.9.2 | 2.02 s | 1.09 s | 1.674 | 1.39 to 2.07 | 15 (14 / 1) | minimenta | 2.6x |
+| gdu | 5.38.0 | 3.01 s | 1.03 s | 2.545 | 2.19 to 3.31 | 15 (15 / 0) | minimenta | 1.7x |
+| dua-cli | 2.45.1 | 1.64 s | 0.97 s | 1.697 | 1.26 to 2.09 | 15 (14 / 1) | minimenta | 2.6x |
+| dust | 1.2.6 | 3.07 s | 1.08 s | 2.771 | 2.34 to 4.06 | 15 (15 / 0) | minimenta | 1.6x |
 
 The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
@@ -129,13 +130,13 @@ The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
 427,459 items. The speed value is relative to ncdu (defaults).
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result | Speed vs baseline |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster | Speed |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: |
-| ncdu (defaults) | 2.9.2 | 9.20 s | 2.11 s | 4.531 | 4.25 to 4.83 | 11 (11 / 0) | minimenta faster | 1.0x (baseline) |
-| ncdu -t 64 | 2.9.2 | 3.85 s | 2.07 s | 1.962 | 1.67 to 2.06 | 11 (11 / 0) | minimenta faster | 2.3x |
-| gdu | 5.38.0 | 5.73 s | 2.15 s | 2.587 | 2.20 to 2.90 | 11 (11 / 0) | minimenta faster | 1.8x |
-| dua-cli | 2.45.1 | 4.34 s | 2.31 s | 1.898 | 1.61 to 2.03 | 11 (11 / 0) | minimenta faster | 2.4x |
-| dust | 1.2.6 | 5.70 s | 2.10 s | 2.504 | 2.25 to 3.27 | 11 (11 / 0) | minimenta faster | 1.8x |
+| ncdu (defaults) | 2.9.2 | 9.20 s | 2.11 s | 4.531 | 4.25 to 4.83 | 11 (11 / 0) | minimenta | 1.0x |
+| ncdu -t 64 | 2.9.2 | 3.85 s | 2.07 s | 1.962 | 1.67 to 2.06 | 11 (11 / 0) | minimenta | 2.3x |
+| gdu | 5.38.0 | 5.73 s | 2.15 s | 2.587 | 2.20 to 2.90 | 11 (11 / 0) | minimenta | 1.8x |
+| dua-cli | 2.45.1 | 4.34 s | 2.31 s | 1.898 | 1.61 to 2.03 | 11 (11 / 0) | minimenta | 2.4x |
+| dust | 1.2.6 | 5.70 s | 2.10 s | 2.504 | 2.25 to 3.27 | 11 (11 / 0) | minimenta | 1.8x |
 
 The speed value of minimenta is 4.5x. It is the ratio of the baseline.
 
@@ -143,13 +144,13 @@ The speed value of minimenta is 4.5x. It is the ratio of the baseline.
 
 737,881 items. The speed value is relative to ncdu (defaults). This tree is in the chart.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result | Speed vs baseline |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster | Speed |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: |
-| ncdu (defaults) | 2.9.1 | 34.84 s | 7.89 s | 4.407 | 4.36 to 4.49 | 7 (7 / 0) | minimenta faster | 1.0x (baseline) |
-| ncdu -t 64 | 2.9.1 | 7.65 s | 7.87 s | 0.979 | 0.96 to 1.01 | 7 (2 / 5) | even | 4.5x |
-| gdu | 5.38.0 | 9.46 s | 7.84 s | 1.206 | 1.19 to 1.24 | 7 (7 / 0) | minimenta faster | 3.7x |
-| dua-cli | 2.45.1 | 11.78 s | 7.94 s | 1.496 | 1.48 to 1.54 | 7 (7 / 0) | minimenta faster | 2.9x |
-| dust | 1.2.6 | 11.12 s | 7.86 s | 1.424 | 1.37 to 1.50 | 7 (7 / 0) | minimenta faster | 3.1x |
+| ncdu (defaults) | 2.9.1 | 34.84 s | 7.89 s | 4.407 | 4.36 to 4.49 | 7 (7 / 0) | minimenta | 1.0x |
+| ncdu -t 64 | 2.9.1 | 7.65 s | 7.87 s | 0.979 | 0.96 to 1.01 | 7 (2 / 5) | even | 4.5x |
+| gdu | 5.38.0 | 9.46 s | 7.84 s | 1.206 | 1.19 to 1.24 | 7 (7 / 0) | minimenta | 3.7x |
+| dua-cli | 2.45.1 | 11.78 s | 7.94 s | 1.496 | 1.48 to 1.54 | 7 (7 / 0) | minimenta | 2.9x |
+| dust | 1.2.6 | 11.12 s | 7.86 s | 1.424 | 1.37 to 1.50 | 7 (7 / 0) | minimenta | 3.1x |
 
 The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
@@ -157,12 +158,12 @@ The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
 304,060 items. The speed value is relative to gdu. This tree is in the chart.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result | Speed vs baseline |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster | Speed |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: |
-| minimenta --no-mft | 0.1.0 | 13.54 s | 4.05 s | 3.351 | 3.19 to 4.32 | 8 (8 / 0) | default scan faster | 1.3x |
-| gdu | 5.38.0 | 18.16 s | 4.17 s | 4.427 | 4.34 to 4.92 | 8 (8 / 0) | minimenta faster | 1.0x (baseline) |
-| dua-cli | 2.45.1 | 17.61 s | 4.02 s | 4.292 | 4.19 to 4.71 | 8 (8 / 0) | minimenta faster | 1.0x |
-| dust | 1.2.6 | 31.42 s | 3.97 s | 7.980 | 7.87 to 8.24 | 8 (8 / 0) | minimenta faster | 0.6x |
+| minimenta --no-mft | 0.1.0 | 13.54 s | 4.05 s | 3.351 | 3.19 to 4.32 | 8 (8 / 0) | default scan | 1.3x |
+| gdu | 5.38.0 | 18.16 s | 4.17 s | 4.427 | 4.34 to 4.92 | 8 (8 / 0) | minimenta | 1.0x |
+| dua-cli | 2.45.1 | 17.61 s | 4.02 s | 4.292 | 4.19 to 4.71 | 8 (8 / 0) | minimenta | 1.0x |
+| dust | 1.2.6 | 31.42 s | 3.97 s | 7.980 | 7.87 to 8.24 | 8 (8 / 0) | minimenta | 0.6x |
 
 The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
@@ -170,40 +171,40 @@ The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
 51,110 items. From bench/gen_tree.py.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- |
-| ncdu (defaults) | 2.9.2 | 214.8 ms | 69.1 ms | 3.217 | 2.24 to 3.96 | 60 (60 / 0) | minimenta faster |
-| ncdu -t 3 | 2.9.2 | 89.0 ms | 69.9 ms | 1.274 | 1.14 to 1.60 | 60 (49 / 11) | minimenta faster |
-| ncdu (defaults, binary export) (setting check) | 2.9.2 | 230.6 ms | 64.4 ms | 3.265 | 2.38 to 4.29 | 60 (60 / 0) | minimenta faster |
-| ncdu -t 3 (JSON export) (setting check) | 2.9.2 | 94.6 ms | 72.9 ms | 1.396 | 1.01 to 1.71 | 60 (46 / 14) | minimenta faster |
-| gdu | 5.38.0 | 131.0 ms | 72.6 ms | 2.023 | 1.38 to 2.40 | 60 (56 / 4) | minimenta faster |
-| dua-cli | 2.45.1 | 80.6 ms | 72.7 ms | 1.154 | 0.78 to 1.74 | 60 (38 / 22) | even |
-| dust | 1.2.6 | 127.3 ms | 65.6 ms | 1.964 | 1.62 to 2.29 | 60 (59 / 1) | minimenta faster |
+| ncdu (defaults) | 2.9.2 | 214.8 ms | 69.1 ms | 3.217 | 2.24 to 3.96 | 60 (60 / 0) | minimenta |
+| ncdu -t 3 | 2.9.2 | 89.0 ms | 69.9 ms | 1.274 | 1.14 to 1.60 | 60 (49 / 11) | minimenta |
+| ncdu (defaults, binary export) (setting check) | 2.9.2 | 230.6 ms | 64.4 ms | 3.265 | 2.38 to 4.29 | 60 (60 / 0) | minimenta |
+| ncdu -t 3 (JSON export) (setting check) | 2.9.2 | 94.6 ms | 72.9 ms | 1.396 | 1.01 to 1.71 | 60 (46 / 14) | minimenta |
+| gdu | 5.38.0 | 131.0 ms | 72.6 ms | 2.023 | 1.38 to 2.40 | 60 (56 / 4) | minimenta |
+| dua-cli | 2.45.1 | 80.6 ms | 72.7 ms | 1.154 | 0.78 to 1.74 | 60 (38 / 22) | even |
+| dust | 1.2.6 | 127.3 ms | 65.6 ms | 1.964 | 1.62 to 2.29 | 60 (59 / 1) | minimenta |
 
 **Scan with a warm cache, Linux, synthetic tree**
 
 51,110 items. From bench/gen_tree.py.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- |
-| ncdu (defaults) | 2.9.1 | 119.6 ms | 48.0 ms | 2.509 | 2.41 to 2.61 | 60 (60 / 0) | minimenta faster |
-| ncdu -t 4 | 2.9.1 | 44.1 ms | 46.1 ms | 0.958 | 0.91 to 1.05 | 60 (19 / 41) | even |
-| ncdu (defaults, binary export) (setting check) | 2.9.1 | 126.5 ms | 47.2 ms | 2.694 | 2.54 to 2.77 | 60 (60 / 0) | minimenta faster |
-| ncdu -t 4 (JSON export) (setting check) | 2.9.1 | 44.0 ms | 46.8 ms | 0.968 | 0.93 to 1.06 | 60 (22 / 38) | even |
-| gdu | 5.38.0 | 80.3 ms | 46.7 ms | 1.726 | 1.67 to 1.83 | 60 (60 / 0) | minimenta faster |
-| dua-cli | 2.45.1 | 154.2 ms | 46.7 ms | 3.332 | 3.18 to 3.47 | 60 (60 / 0) | minimenta faster |
-| dust | 1.2.6 | 75.8 ms | 46.7 ms | 1.634 | 1.59 to 1.77 | 60 (60 / 0) | minimenta faster |
+| ncdu (defaults) | 2.9.1 | 119.6 ms | 48.0 ms | 2.509 | 2.41 to 2.61 | 60 (60 / 0) | minimenta |
+| ncdu -t 4 | 2.9.1 | 44.1 ms | 46.1 ms | 0.958 | 0.91 to 1.05 | 60 (19 / 41) | even |
+| ncdu (defaults, binary export) (setting check) | 2.9.1 | 126.5 ms | 47.2 ms | 2.694 | 2.54 to 2.77 | 60 (60 / 0) | minimenta |
+| ncdu -t 4 (JSON export) (setting check) | 2.9.1 | 44.0 ms | 46.8 ms | 0.968 | 0.93 to 1.06 | 60 (22 / 38) | even |
+| gdu | 5.38.0 | 80.3 ms | 46.7 ms | 1.726 | 1.67 to 1.83 | 60 (60 / 0) | minimenta |
+| dua-cli | 2.45.1 | 154.2 ms | 46.7 ms | 3.332 | 3.18 to 3.47 | 60 (60 / 0) | minimenta |
+| dust | 1.2.6 | 75.8 ms | 46.7 ms | 1.634 | 1.59 to 1.77 | 60 (60 / 0) | minimenta |
 
 **Scan with a warm cache, Windows, synthetic tree**
 
 51,110 items. From bench/gen_tree.py.
 
-| Tool | Version | Tool median | minimenta median | Ratio | Middle half | Pairs (minimenta faster / tool faster) | Result |
+| Tool | Version | Tool time | minimenta time | Ratio | Middle half | Pairs | Faster |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- |
-| minimenta --no-mft | 0.1.0 | 31.7 ms | 31.8 ms | 0.993 | 0.96 to 1.02 | 60 (24 / 36) | even |
-| gdu | 5.38.0 | 83.2 ms | 31.4 ms | 2.667 | 2.59 to 2.72 | 60 (60 / 0) | minimenta faster |
-| dua-cli | 2.45.1 | 85.4 ms | 31.3 ms | 2.719 | 2.65 to 2.76 | 60 (60 / 0) | minimenta faster |
-| dust | 1.2.6 | 766.7 ms | 31.9 ms | 23.980 | 22.75 to 24.46 | 60 (60 / 0) | minimenta faster |
+| minimenta --no-mft | 0.1.0 | 31.7 ms | 31.8 ms | 0.993 | 0.96 to 1.02 | 60 (24 / 36) | even |
+| gdu | 5.38.0 | 83.2 ms | 31.4 ms | 2.667 | 2.59 to 2.72 | 60 (60 / 0) | minimenta |
+| dua-cli | 2.45.1 | 85.4 ms | 31.3 ms | 2.719 | 2.65 to 2.76 | 60 (60 / 0) | minimenta |
+| dust | 1.2.6 | 766.7 ms | 31.9 ms | 23.980 | 22.75 to 24.46 | 60 (60 / 0) | minimenta |
 
 <!-- speed-tables:end -->
 
@@ -211,10 +212,10 @@ The speed value of minimenta is 4.4x. It is the ratio of the baseline.
 
 - **Linux:** `ncdu -t 64` and minimenta are even on a cold disk. The middle half of the pair ratios includes 1. The bar of `ncdu -t 64` is a little longer in the chart because its median ratio is below 1. On the warm tree, `ncdu -t 4` and minimenta are even too.
 - **macOS:** the data volume (`/opt/homebrew`) is the main result. On `/System/Library`, minimenta skips empty folders without opening them. That works only on the system volume, and the other tools open every folder, so this tree favors minimenta. Cold macOS runs are short. minimenta needs about 1 s for `/opt/homebrew` after `purge`. Read these runs as "after purge", not as raw disk speed. On the warm tree, dua-cli and minimenta are even. The middle half is wide because the macOS runner is noisy.
-- **Windows:** the runner is an administrator, so minimenta reads the NTFS master file table (MFT). The row `minimenta --no-mft` is a run without administrator rights. The chart shows it as "minimenta (no admin)". In its table row, the tool median is the time of the `--no-mft` scan, and the minimenta median is the time of the administrator scan. In run 37904223270, these medians are 13.5 s and 4.1 s. The median of the pair ratios is 3.35. It is not 13.5 divided by 4.1 (3.3), because the median of ratios is not the ratio of medians. On the warm tree, `minimenta --no-mft` and minimenta are even. The scan takes about 32 ms, which is less than the 50 ms that pass before the MFT reader can start. On this tree, dust needs 767 ms against 32 ms for minimenta. We did not look into why.
+- **Windows:** the runner is an administrator, so minimenta reads the NTFS master file table (MFT). The row `minimenta --no-mft` is a run without administrator rights. The chart shows it as "minimenta (no admin)". In its table row, Tool time is the time of the `--no-mft` scan, and minimenta time is the time of the administrator scan. In run 37904223270, these medians are 13.5 s and 4.1 s. The median of the pair ratios is 3.351. It is not 13.5 divided by 4.1 (3.3), because the median of ratios is not the ratio of medians. On the warm tree, `minimenta --no-mft` and minimenta are even. The scan takes about 32 ms, which is less than the 50 ms that pass before the MFT reader can start. On this tree, dust needs 767 ms against 32 ms for minimenta. We did not look into why.
 - **Microsoft Defender:** real-time monitoring is off on the Windows runner, and `C:\` and `D:\` are excluded. Endpoint security software inspects every directory open. On machines that run it, opening directories takes a large part of the scan time for every tool, and the difference between minimenta and ncdu becomes smaller.
 - **dust and dua-cli:** dust prints a tree and is not interactive. dua-cli exits with code 1 on `/System/Library`. minimenta reports 10 read errors there, so unreadable folders are the likely cause.
-- **The 2x goal:** minimenta aims for 2x over ncdu at its best (`-t 64`) on a cold disk. It does not reach this goal in every run. On macOS, the ratio is 1.67 on `/opt/homebrew` and 1.96 on `/System/Library` in run 37904223270. In run 37901931836, it is 2.09 and 2.03. On Linux, the two tools are even.
+- **The 2x goal:** minimenta aims for 2x over ncdu at its best. The cold runs test only one multi-thread setting of ncdu, `-t 64`. Against it, minimenta does not reach 2x in every run. On macOS, the ratio is 1.674 on `/opt/homebrew` and 1.962 on `/System/Library` in run 37904223270. In run 37901931836, it is 2.088 and 2.033. On Linux, the two tools are even.
 
 **Repeat scans on macOS.** A repeat scan reads the cache and lists again only the folders that FSEvents reports as changed. It does not scan the disk again, so the numbers do not compare with the first scans above. They are not part of run 37904223270.
 
@@ -237,7 +238,7 @@ A scan of `/` on macOS now counts the data volume once. Before, every file behin
 - **Versions.** The Version column of each table shows them. ncdu is 2.9.2 on macOS (Homebrew) and 2.9.1 on Linux. No static build of ncdu 2.9.2 exists, and ncdu 2.9.2 only fixes a build problem. dua-cli on Linux is the musl build, which is the only x86-64 Linux release file.
 - **CI benchmarks.** The benchmark jobs in `ci.yml` ([`bench/cold.sh`](bench/cold.sh), [`bench/throughput.sh`](bench/throughput.sh), [`bench/windows.sh`](bench/windows.sh)) stay as quick checks. The numbers on this page do not come from them.
 
-**Runs differ.** The runner hardware changes between runs, and the ratios change with it. Run 37901931836 got other CPUs on Linux (Intel Xeon Platinum 8370C) and on Windows (another AMD generation). On macOS, the runner type was the same. Even so, the cold ratios moved by 1% to 20% between run 37901931836 and run 37904223270. For example, gdu on `/opt/homebrew` went from 3.11 to 2.55, and ncdu on `/System/Library` went from 5.08 to 4.53. On Linux, ncdu went from 3.30 to 4.41. On Windows, the MFT scan of minimenta took 8.1 s to 8.5 s in the first run and 4.0 s to 4.2 s in the second. The medians of gdu, dua-cli and dust changed by less than 3%. Read every ratio as one sample on one machine type.
+**Runs differ.** The runner hardware changes between runs, and the ratios change with it. Run 37901931836 got other CPUs on Linux (Intel Xeon Platinum 8370C) and on Windows (another AMD generation). On macOS, the runner type was the same. Even so, the cold ratios moved by 1% to 20% between run 37901931836 and run 37904223270. For example, gdu on `/opt/homebrew` went from 3.109 to 2.545, and ncdu on `/System/Library` went from 5.080 to 4.531. On Linux, ncdu went from 3.302 to 4.407. On Windows, the MFT scan of minimenta took 8.1 s to 8.5 s in the first run and 4.0 s to 4.2 s in the second. The medians of gdu, dua-cli and dust changed by less than 3%. Read every ratio as one sample on one machine type.
 
 </details>
 
