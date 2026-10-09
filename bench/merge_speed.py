@@ -23,7 +23,7 @@ NOTES = {
 }
 
 ROW_FIELDS = (
-    "tool", "name", "label", "version", "settings", "threads", "pairs", "median_ms", "minimenta_median_ms",
+    "tool", "name", "label", "version", "settings", "threads", "pairs", "minimenta_faster_pairs", "tool_faster_pairs", "median_ms", "minimenta_median_ms",
     "ratio_median", "ratio_q1", "ratio_q3", "verdict", "diagnostic",
 )
 

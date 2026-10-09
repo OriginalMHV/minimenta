@@ -9,7 +9,9 @@ median ratio stays fair on a shared runner.
 A cold section clears the file cache before every run. A warm section reads a
 tree that the file cache already holds. Before the timed pairs, the script
 runs every tool once to measure its single-run time. It uses these times to
-plan how many pairs fit in the time budget of the section.
+estimate how many pairs fit in the time budget of the section. The rounds then
+stop at the maximum number of pairs, or when the next round does not fit in the
+budget. A section always runs the minimum number of pairs.
 
 Before it times anything, the script also runs every tool once on each tree,
 and compares the totals. A tool that reports a far lower total than
@@ -331,7 +333,7 @@ def verdict(median, q1, q3):
     return "minimenta" if median > 1.0 else "tool"
 
 
-def summarize(tool, tm, tt, codes, planned):
+def summarize(tool, tm, tt, codes, estimated):
     ratios = [t / m for t, m in zip(tt, tm)]
     q1, q3 = quartiles(ratios)
     median = statistics.median(ratios)
@@ -344,7 +346,9 @@ def summarize(tool, tm, tt, codes, planned):
         "settings": tool.settings,
         "threads": tool.threads,
         "pairs": len(ratios),
-        "planned_pairs": planned,
+        "estimated_pairs": estimated,
+        "minimenta_faster_pairs": sum(r > 1.0 for r in ratios),
+        "tool_faster_pairs": sum(r < 1.0 for r in ratios),
         "median_ms": round(statistics.median(tt) * 1000, 1),
         "minimenta_median_ms": round(statistics.median(tm) * 1000, 1),
         "ratio_median": round(median, 3),
@@ -450,14 +454,17 @@ def run_section(args, runner, mode, tree_id, path, cores):
     round_cost = sum((2 * purge_s if cold else 0) + mm_single + singles[t.id] for t in tools)
     spent = time.perf_counter() - started
     left = max(section["budget_s"] - spent, 0)
-    planned = int(left / round_cost) - warmup if round_cost else args.max_warm_pairs
-    planned = max(args.min_pairs, min(args.max_pairs if cold else args.max_warm_pairs, planned))
-    log(f"-- plan: {planned} pairs per tool, one round costs about {round_cost:.1f} s, {left:.0f} s left in the section budget")
+    limit = args.max_pairs if cold else args.max_warm_pairs
+    estimated = int(left / round_cost) - warmup if round_cost else limit
+    estimated = max(args.min_pairs, min(limit, estimated))
+    log(f"-- plan: about {estimated} pairs per tool, one round costs about {round_cost:.1f} s, {left:.0f} s left in the section budget")
+    log(f"   The rounds stop at {limit} pairs, or when the next round does not fit in the budget (after at least {args.min_pairs}).")
     section["plan"] = {
         "single_run_s": {k: round(v, 3) for k, v in singles.items()},
         "purge_s": round(purge_s, 3),
         "round_cost_s": round(round_cost, 1),
-        "planned_pairs": planned,
+        "estimated_pairs": estimated,
+        "max_pairs": limit,
     }
 
     for _ in range(warmup):
@@ -469,8 +476,7 @@ def run_section(args, runner, mode, tree_id, path, cores):
     active = list(tools)
     loop_started = time.perf_counter()
     loop_budget = max(section["budget_s"] - (loop_started - started), 0)
-    for r in range(planned):
-        round_started = time.perf_counter()
+    for r in range(limit):
         for i, tool in enumerate(list(active)):
             tm_list, tt_list, codes = times[tool.id]
             try:
@@ -487,15 +493,15 @@ def run_section(args, runner, mode, tree_id, path, cores):
             tm_list.append(tm)
             tt_list.append(tt)
             codes.append(code)
-            log(f"   round {r + 1}/{planned} {tool.id}: minimenta {tm:.3f} s, tool {tt:.3f} s, ratio {tt / tm:.2f}")
-        now = time.perf_counter()
+            log(f"   round {r + 1} {tool.id}: minimenta {tm:.3f} s, tool {tt:.3f} s, ratio {tt / tm:.2f}")
         done = r + 1
-        if done >= args.min_pairs and now - loop_started + (now - round_started) > loop_budget:
+        spent_in_loop = time.perf_counter() - loop_started
+        if done >= args.min_pairs and spent_in_loop + spent_in_loop / done > loop_budget:
             log(f"-- time budget reached after {done} pairs")
             break
 
     section["results"] = [
-        summarize(tool, *times[tool.id][:2], times[tool.id][2], planned) for tool in tools if times[tool.id][0]
+        summarize(tool, *times[tool.id][:2], times[tool.id][2], estimated) for tool in tools if times[tool.id][0]
     ]
     section["elapsed_s"] = round(time.perf_counter() - section_started, 1)
     section["purge"] = runner.purge["text"] if cold else None
@@ -628,8 +634,8 @@ def main():
     parser.add_argument("--cold", action="append", default=[], metavar="ID=PATH")
     parser.add_argument("--warm", action="append", default=[], metavar="ID=PATH")
     parser.add_argument("--min-pairs", type=int, default=3)
-    parser.add_argument("--max-pairs", type=int, default=9, help="most pairs in a cold section")
-    parser.add_argument("--max-warm-pairs", type=int, default=30, help="most pairs in a warm section")
+    parser.add_argument("--max-pairs", type=int, default=15, help="most pairs in a cold section")
+    parser.add_argument("--max-warm-pairs", type=int, default=60, help="most pairs in a warm section")
     parser.add_argument("--cold-budget", type=int, default=480, help="seconds per cold tree")
     parser.add_argument("--warm-budget", type=int, default=240, help="seconds per warm tree")
     parser.add_argument("--timeout", type=int, default=900, help="seconds for one run")
