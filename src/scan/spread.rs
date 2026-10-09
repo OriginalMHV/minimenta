@@ -428,7 +428,6 @@ mod tests {
         CString::new(path.as_os_str().as_bytes()).unwrap()
     }
 
-    /// A deep chain, a wide directory, empty directories and a few files.
     fn build(root: &Path) {
         fs::create_dir_all(root.join("a/b/c/d/e")).unwrap();
         File::create(root.join("a/b/c/d/e/deep.bin"))
@@ -454,8 +453,6 @@ mod tests {
         std::os::unix::fs::symlink("a", root.join("alias")).unwrap();
     }
 
-    /// One line for every entry in the tree, sorted. Two scans of the same
-    /// tree give the same lines.
     fn lines(dir: &Dir, prefix: &str, out: &mut Vec<String>) {
         for e in &dir.entries {
             let name = format!("{prefix}/{}", String::from_utf8_lossy(dir.name(e)));
@@ -646,27 +643,33 @@ mod tests {
         assert_eq!(scan.pool.lock().unwrap().path_bytes, 0);
     }
 
+    fn windows(start: (f64, bool), busy: &[f64]) -> (f64, bool) {
+        busy.iter()
+            .fold(start, |state, &b| smooth(state.0, state.1, b))
+    }
+
     #[test]
-    fn a_scan_turns_cold_after_busy_shares_fall_and_warm_after_they_rise() {
+    fn one_idle_window_does_not_make_a_warm_scan_cold() {
         let mut state = (1.0, false);
-        // A warm scan keeps the CPUs busy, with one bad window.
         for busy in [0.95, 0.9, 0.3, 0.95, 0.9, 0.97] {
             state = smooth(state.0, state.1, busy);
             assert!(!state.1, "busy {busy}");
         }
-        // A cold scan leaves the CPUs idle. Two windows are enough.
-        state = smooth(state.0, state.1, 0.3);
-        assert!(!state.1);
-        state = smooth(state.0, state.1, 0.3);
-        assert!(state.1);
-        // One busy window in the middle of a cold scan changes nothing.
-        state = smooth(state.0, state.1, 0.9);
-        assert!(state.1);
-        // A scan that stays busy turns warm.
-        for _ in 0..4 {
-            state = smooth(state.0, state.1, 0.95);
-        }
-        assert!(!state.1);
+    }
+
+    #[test]
+    fn two_idle_windows_make_a_scan_cold_and_one_busy_window_does_not_undo_it() {
+        assert!(!windows((1.0, false), &[0.3]).1);
+        let cold = windows((1.0, false), &[0.3, 0.3]);
+        assert!(cold.1);
+        assert!(windows(cold, &[0.9]).1);
+    }
+
+    #[test]
+    fn a_cold_scan_that_keeps_the_cpus_busy_turns_warm() {
+        let cold = windows((1.0, false), &[0.3, 0.3, 0.3]);
+        assert!(cold.1);
+        assert!(!windows(cold, &[0.95; 4]).1);
     }
 
     #[test]
