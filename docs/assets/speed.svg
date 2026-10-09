@@ -1,1 +1,66 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"><style>.fg{fill:#1F2328}.mu{fill:#59636E}.ac{fill:#1A7F5A}.bar{fill:#8C959F}@media (prefers-color-scheme: dark){.fg{fill:#F0F6FC}.mu{fill:#9198A1}.ac{fill:#44B78F}.bar{fill:#6E7681}}</style><text x="40" y="34" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" class="fg">First scan of a cold disk</text><text x="40" y="60" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Speed relative to ncdu with its default settings. Longer is faster.</text><text x="40" y="104" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" class="mu">macOS</text><text x="40" y="140" font-size="22" class="fg">minimenta</text><text x="230" y="140" font-size="22" class="fg">5.3x</text><text x="310" y="140" font-size="22" xml:space="preserve" class="mu">[<tspan class="ac">####################</tspan>]</text><text x="40" y="176" font-size="22" class="mu">ncdu -t 64</text><text x="230" y="176" font-size="22" class="mu">4.6x</text><text x="310" y="176" font-size="22" xml:space="preserve" class="mu">[<tspan class="bar">#################</tspan>   ]</text><text x="40" y="212" font-size="22" class="mu">ncdu</text><text x="230" y="212" font-size="22" class="mu">1.0x</text><text x="310" y="212" font-size="22" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                ]</text><text x="40" y="256" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" class="mu">Linux</text><text x="40" y="292" font-size="22" class="fg">minimenta</text><text x="230" y="292" font-size="22" class="fg">4.5x</text><text x="310" y="292" font-size="22" xml:space="preserve" class="mu">[<tspan class="ac">###################</tspan> ]</text><text x="40" y="328" font-size="22" class="mu">ncdu -t 64</text><text x="230" y="328" font-size="22" class="mu">4.7x</text><text x="310" y="328" font-size="22" xml:space="preserve" class="mu">[<tspan class="bar">####################</tspan>]</text><text x="40" y="364" font-size="22" class="mu">ncdu</text><text x="230" y="364" font-size="22" class="mu">1.0x</text><text x="310" y="364" font-size="22" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                ]</text><text x="40" y="412" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">File cache dropped before every run (bench/cold.sh), interleaved runs, CI runners.</text><text x="40" y="436" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">macOS: 3 cores, /System/Library, 427,124 items. Linux: 4 cores, /usr, 737,881 items.</text><text x="40" y="460" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Only a few runs per pair: expect differences of about 10% between runs.</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="656" height="805" viewBox="0 0 656 805" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+<!-- Data: Speed workflow run 37904223270, cold first scans, median of tool time divided by minimenta time. -->
+<style>.fg{fill:#1F2328}.mu{fill:#59636E}.ac{fill:#1A7F5A}.bar{fill:#8C959F}@media (prefers-color-scheme: dark){.fg{fill:#F0F6FC}.mu{fill:#9198A1}.ac{fill:#44B78F}.bar{fill:#6E7681}}</style>
+<text x="40" y="34" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" class="fg">First scan of a cold disk</text>
+<text x="40" y="60" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">How many times faster minimenta is than each tool. A longer bar is a bigger lead.</text>
+<text x="40" y="82" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">1.0x is even. A value below 1.0x means that the other tool is faster.</text>
+<text x="40" y="128" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" class="mu">macOS</text>
+<text x="124" y="128" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">3 cores, /opt/homebrew, 200,140 items</text>
+<text x="40" y="159" font-size="18" class="mu">ncdu</text>
+<text x="232" y="159" font-size="18" text-anchor="end" class="fg">4.4x</text>
+<text x="250" y="159" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">##################</tspan>              ]</text>
+<text x="40" y="185" font-size="18" class="mu">ncdu -t 64</text>
+<text x="232" y="185" font-size="18" text-anchor="end" class="fg">1.67x</text>
+<text x="250" y="185" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">#######</tspan>                         ]</text>
+<text x="40" y="211" font-size="18" class="mu">gdu</text>
+<text x="232" y="211" font-size="18" text-anchor="end" class="fg">2.5x</text>
+<text x="250" y="211" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">##########</tspan>                      ]</text>
+<text x="40" y="237" font-size="18" class="mu">dua-cli</text>
+<text x="232" y="237" font-size="18" text-anchor="end" class="fg">1.70x</text>
+<text x="250" y="237" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">#######</tspan>                         ]</text>
+<text x="40" y="263" font-size="18" class="mu">dust*</text>
+<text x="232" y="263" font-size="18" text-anchor="end" class="fg">2.8x</text>
+<text x="250" y="263" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">###########</tspan>                     ]</text>
+<text x="40" y="301" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" class="mu">Linux</text>
+<text x="124" y="301" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">4 cores, /usr, 737,881 items</text>
+<text x="40" y="332" font-size="18" class="mu">ncdu</text>
+<text x="232" y="332" font-size="18" text-anchor="end" class="fg">4.4x</text>
+<text x="250" y="332" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">##################</tspan>              ]</text>
+<text x="40" y="358" font-size="18" class="mu">ncdu -t 64</text>
+<text x="232" y="358" font-size="18" text-anchor="end" class="fg">0.98x</text>
+<text x="250" y="358" font-size="18" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                            ]</text>
+<text x="320.8" y="358" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">even</text>
+<text x="40" y="384" font-size="18" class="mu">gdu</text>
+<text x="232" y="384" font-size="18" text-anchor="end" class="fg">1.21x</text>
+<text x="250" y="384" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">#####</tspan>                           ]</text>
+<text x="40" y="410" font-size="18" class="mu">dua-cli</text>
+<text x="232" y="410" font-size="18" text-anchor="end" class="fg">1.50x</text>
+<text x="250" y="410" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">######</tspan>                          ]</text>
+<text x="40" y="436" font-size="18" class="mu">dust*</text>
+<text x="232" y="436" font-size="18" text-anchor="end" class="fg">1.42x</text>
+<text x="250" y="436" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">######</tspan>                          ]</text>
+<text x="40" y="474" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" class="mu">Windows</text>
+<text x="124" y="474" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">4 cores, C:\Program Files, 304,060 items, as administrator</text>
+<text x="40" y="505" font-size="18" class="mu">ncdu</text>
+<text x="232" y="505" font-size="18" text-anchor="end" class="mu">n/a</text>
+<text x="250" y="505" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">ncdu does not run on Windows</text>
+<text x="40" y="531" font-size="18" class="mu">ncdu -t 64</text>
+<text x="232" y="531" font-size="18" text-anchor="end" class="mu">n/a</text>
+<text x="250" y="531" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">ncdu does not run on Windows</text>
+<text x="40" y="557" font-size="18" class="mu">gdu</text>
+<text x="232" y="557" font-size="18" text-anchor="end" class="fg">4.4x</text>
+<text x="250" y="557" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">##################</tspan>              ]</text>
+<text x="40" y="583" font-size="18" class="mu">dua-cli</text>
+<text x="232" y="583" font-size="18" text-anchor="end" class="fg">4.3x</text>
+<text x="250" y="583" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">#################</tspan>               ]</text>
+<text x="40" y="609" font-size="18" class="mu">dust*</text>
+<text x="232" y="609" font-size="18" text-anchor="end" class="fg">8.0x</text>
+<text x="250" y="609" font-size="18" xml:space="preserve" class="mu">[<tspan class="ac">################################</tspan>]</text>
+<text x="40" y="639" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Without administrator rights, minimenta takes 3.4x as long (--no-mft).</text>
+<text x="40" y="681" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">* dust prints a tree. It is not interactive.</text>
+<text x="40" y="701" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Each value is the median of tool time divided by minimenta time.</text>
+<text x="40" y="721" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">The operating system file cache is dropped before every run.</text>
+<text x="40" y="741" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">The cloud host cache may still be warm.</text>
+<text x="40" y="761" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Measured on GitHub runners on 2026-10-09. Versions: minimenta 0.1.0,</text>
+<text x="40" y="781" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">gdu 5.38.0, dua-cli 2.45.1, dust 1.2.6, ncdu 2.9.2 (macOS) and 2.9.1 (Linux).</text>
+</svg>
