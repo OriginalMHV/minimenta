@@ -20,6 +20,8 @@ use macos as platform;
 mod linux;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 use linux as platform;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod spread;
 
 #[cfg(all(
     unix,
@@ -348,6 +350,9 @@ fn list(
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    let (mut dir, result) = pool.install(|| spread::scan_tree(&ctx, &root, dev_ino(meta).1));
+    #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
     let (mut dir, result) = pool.install(|| scan_dir(&ctx, &root, 0, dev_ino(meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
