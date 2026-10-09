@@ -187,14 +187,10 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Dir>
 /// folders, and the MFT wins on a cold disk, where a listing waits for
 /// thousands of small reads.
 ///
-/// The reader starts at once for a scan of a whole volume, where it always
-/// wins. For a folder it starts only after `mft_start::FOLDER_DELAY`, and
-/// only while the listing is still slow. Both then compete for the disk, so a
-/// cold folder that the listing finishes within a few seconds must not pay for
-/// the reader: a cold folder with 32,000 items took 1.2 s to 2.7 s with the
-/// listing alone and 3.6 s to 4.0 s in an immediate race. A large cold folder
-/// pays the delay: the immediate race read `C:\Program Files` in about 4.2 s
-/// where the listing alone took 12 s to 20 s.
+/// A scan of a whole volume starts the reader at once, because it always wins
+/// there. A scan of a folder starts the reader only after
+/// `mft_start::FOLDER_DELAY`, and only while the listing is still slow. That
+/// module has the reasons and the measured costs.
 #[cfg(windows)]
 fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -> io::Result<Dir> {
     let start = std::time::Instant::now();

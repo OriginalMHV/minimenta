@@ -3,15 +3,15 @@
 //! need no clock and no disk, and they run on every platform.
 //!
 //! The reader always reads the table of the whole volume, whatever the folder
-//! is. For a 1.3 GB table this takes about 3 s to 4 s. It keeps 16 reads of
-//! 4 MiB in flight, so the small reads of the listing wait behind them. This
-//! gives two cases:
+//! is. On the Windows runner, a table of 1.3 GB took about 3.9 s. The reader
+//! keeps 16 reads of 4 MiB in flight, so the small reads of the listing wait
+//! behind them. This gives two cases:
 //!
-//! - A whole volume. The listing must visit every item, and the reader wins
-//!   by a wide margin. The reader starts at once.
-//! - A folder. A folder that lists within a few seconds is faster without the
-//!   reader, because both compete for the disk. The reader starts only when
-//!   the listing has run for `FOLDER_DELAY` and is still slow.
+//! - A whole volume. The listing must visit every item, and the reader wins by
+//!   a wide margin. The reader starts at once.
+//! - A folder. A cold folder with 32,000 items listed in 1.9 s, and the scan
+//!   took 3.8 s when the reader started after 50 ms. The reader starts only
+//!   when the listing has run for `FOLDER_DELAY` and is still slow.
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -19,7 +19,18 @@ use std::time::{Duration, Instant};
 use super::Progress;
 
 /// How long the listing of a folder runs alone before the reader may start.
-pub(super) const FOLDER_DELAY: Duration = Duration::from_secs(2);
+///
+/// On the Windows runner, cold folders with 24,000 to 35,000 items listed in
+/// 1.0 s to 3.1 s. The slowest one shows the effect of the delay. With 2 s,
+/// the reader started in every run and the scan took 4.1 s to 4.6 s. With 3 s,
+/// the scan took 3.0 s to 3.5 s. The listing alone took 3.1 s.
+///
+/// Large folders pay for the delay. A cold `C:\Program Files` with 304,000
+/// items took 6.8 s with 3 s, 5.7 s with 2 s and 3.9 s with an immediate
+/// reader. Without the reader it took 13.5 s to 14.2 s. A folder that lists in
+/// about 3 s still pays when the reader starts late, because the reader slows
+/// the end of the listing. The worst run took 7.0 s against 3.0 s.
+pub(super) const FOLDER_DELAY: Duration = Duration::from_secs(3);
 
 /// The listing rate is the item count of one window divided by its length.
 const WINDOW: Duration = Duration::from_millis(250);
@@ -123,7 +134,6 @@ mod tests {
 
     #[test]
     fn a_folder_never_starts_the_reader_before_the_delay() {
-        // 100 items/s is far below the slow rate.
         assert!(!should_start(false, ms(0), DELAY, Some(100.0)));
         assert!(!should_start(false, ms(1_999), DELAY, Some(100.0)));
         assert!(!should_start(false, ms(1_999), DELAY, Some(0.0)));
@@ -158,9 +168,7 @@ mod tests {
             "the window has not passed"
         );
         assert_eq!(check.remaining(at(100)), ms(150));
-        // 25,000 items in 250 ms is 100,000 items/s.
         assert_eq!(check.sample(at(250), 25_000), Some(100_000.0));
-        // The next window counts from the last sample: 2,500 items in 250 ms.
         assert_eq!(check.sample(at(500), 27_500), Some(10_000.0));
         assert_eq!(check.sample(at(600), 99_000), None);
     }
