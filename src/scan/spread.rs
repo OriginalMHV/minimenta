@@ -58,13 +58,14 @@ const LIMITS: Limits = Limits {
     path_bytes: 32 << 20,
 };
 
-/// Items per window of the detector. The kept limits below were fitted to
-/// windows of this size, which is about 180 windows for `/usr`. A cold scan
-/// of `/usr` took about 36 ms per window, a warm scan about 2.7 ms.
+/// Items per window of the detector. The limits below were fitted to windows
+/// of this size, which gives about 180 windows for `/usr`. A cold scan of
+/// `/usr` took about 36 ms per window and a warm scan about 2.7 ms on average.
+/// The size was chosen and not tuned.
 const WINDOW_ITEMS: u64 = 4096;
-/// A window shorter than this is skipped and joins the next one. Warm windows
-/// lasted 2.2 ms (51k tree) to 2.7 ms (`/usr`) on the runners. The value was
-/// chosen and not tuned. It keeps a single tiny window from deciding.
+/// A window shorter than this is skipped and joins the next one. A warm scan of
+/// `/usr` closed 120 of its 180 possible windows, so about a third of the warm
+/// windows were this short. The value was chosen and not tuned.
 const SHORTEST_WINDOW: f64 = 0.002;
 /// Weight of the windows before the last one in the smoothed busy share.
 const KEEP: f64 = 0.5;
@@ -77,7 +78,8 @@ const KEEP: f64 = 0.5;
 const ENTER_COLD: f64 = 0.55;
 /// A cold scan turns warm again above this value.
 const LEAVE_COLD: f64 = 0.75;
-/// Any non-zero start works for the generator. A fixed one repeats the picks.
+/// Any non-zero start works for the generator. A fixed start gives the same
+/// picks for the same pool sizes.
 const SEED: u64 = 0x2545_F491_4F6C_DD1D;
 
 type Slot = Mutex<Option<(Dir, io::Result<()>)>>;
