@@ -1,0 +1,142 @@
+name: Speed
+
+# Compares minimenta with ncdu, gdu, dua-cli and dust on Linux, macOS and
+# Windows. Each job takes about 30 minutes, so this workflow runs only when
+# bench/ or this file changes, and on request. The normal CI stays fast.
+# Each job prints one JSON document between markers and uploads it. The last
+# job merges the three documents.
+on:
+  pull_request:
+    paths:
+      - bench/**
+      - .github/workflows/speed.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speed-${{ github.ref }}
+  cancel-in-progress: true
+
+# An explicit bash shell runs with -eo pipefail.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Machine
+        run: |
+          target/release/minimenta --version
+          nproc
+          free -m
+          df -h /usr
+          uname -a
+      - name: Install the other tools
+        run: bench/install-tools.sh linux "$RUNNER_TEMP/tools"
+      - name: Create the synthetic tree
+        run: python3 -I bench/gen_tree.py "$RUNNER_TEMP/bench-tree"
+      - name: Compare
+        run: |
+          python3 -I bench/compare.py --out "$RUNNER_TEMP/speed-linux.json" --tools-dir "$RUNNER_TEMP/tools" \
+            --cold usr=/usr --warm synthetic="$RUNNER_TEMP/bench-tree" \
+            --cold-budget 1080 --warm-budget 240
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: speed-linux
+          path: ${{ runner.temp }}/speed-linux.json
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Machine
+        run: |
+          target/release/minimenta --version
+          sw_vers
+          sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string
+          df -h /System/Volumes/Data
+      - name: Install the other tools
+        run: bench/install-tools.sh macos "$RUNNER_TEMP/tools"
+      - name: Create the synthetic tree
+        run: python3 -I bench/gen_tree.py "$RUNNER_TEMP/bench-tree"
+      # /opt/homebrew is on the data volume and holds many small files, links
+      # and folders, like the files of a developer. /System/Library skips empty
+      # system folders, which users rarely benefit from, so it is a second result.
+      - name: Compare
+        run: |
+          python3 -I bench/compare.py --out "$RUNNER_TEMP/speed-macos.json" --tools-dir "$RUNNER_TEMP/tools" \
+            --cold homebrew=/opt/homebrew --cold system-library=/System/Library \
+            --warm synthetic="$RUNNER_TEMP/bench-tree" \
+            --cold-budget 600 --warm-budget 240
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: speed-macos
+          path: ${{ runner.temp }}/speed-macos.json
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Machine
+        run: |
+          target/release/minimenta.exe --version
+          powershell -NoProfile -Command "Get-CimInstance Win32_ComputerSystem | Select-Object NumberOfLogicalProcessors,TotalPhysicalMemory | Format-List"
+          powershell -NoProfile -Command "'Administrator: ' + [bool](([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+          powershell -NoProfile -Command "Get-MpPreference | Select-Object DisableRealtimeMonitoring,ExclusionPath | Format-List"
+      - name: Install the other tools
+        run: bench/install-tools.sh windows "$(cygpath -m "$RUNNER_TEMP")/tools"
+      - name: Create the synthetic tree
+        run: python -I bench/gen_tree.py "$(cygpath -m "$RUNNER_TEMP")/bench-tree"
+      # The runner is an administrator, so minimenta reads the NTFS master file
+      # table. "minimenta --no-mft" shows what a user without these rights gets.
+      - name: Compare
+        run: |
+          t=$(cygpath -m "$RUNNER_TEMP")
+          python -I bench/compare.py --out "$t/speed-windows.json" --tools-dir "$t/tools" \
+            --cold "program-files=C:/Program Files" --warm synthetic="$t/bench-tree" \
+            --cold-budget 960 --warm-budget 240
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: speed-windows
+          path: ${{ runner.temp }}/speed-windows.json
+          if-no-files-found: error
+
+  merge:
+    needs: [linux, macos, windows]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: speed-*
+          path: speeds
+      - name: Merge the three documents
+        run: python3 -I bench/merge_speed.py speed-merged.json speeds/*/speed-*.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: speed-merged
+          path: speed-merged.json
+          if-no-files-found: error
