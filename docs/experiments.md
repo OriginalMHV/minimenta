@@ -61,7 +61,7 @@ After [#14](https://github.com/OriginalMHV/minimenta/pull/14) (20 runs): [run 37
 
 ## Linux
 
-All Linux numbers come from GitHub `ubuntu-latest` runners with 4 vCPUs and an ext4 root disk on a virtual disk. ncdu is version 2.9.1.
+All Linux numbers come from GitHub `ubuntu-latest` runners with 4 vCPUs and an ext4 root disk on a virtual disk ([#4](https://github.com/OriginalMHV/minimenta/pull/4), [run 37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270)). ncdu is version 2.9.1.
 
 | Idea | Status | Result | Evidence |
 | --- | --- | --- | --- |
@@ -97,7 +97,7 @@ All Linux numbers come from GitHub `ubuntu-latest` runners with 4 vCPUs and an e
 
 ## macOS
 
-All macOS numbers come from GitHub `macos-latest` runners (Apple M1 Virtual, 3 cores) unless the row says otherwise. ncdu is version 2.9.2. There is no bare-metal run.
+All macOS numbers come from GitHub `macos-latest` runners (Apple M1 Virtual, 3 cores) unless the row says otherwise ([run 37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270)). ncdu is version 2.9.2. There is no bare-metal run.
 
 | Idea | Status | Result | Evidence |
 | --- | --- | --- | --- |
@@ -129,7 +129,7 @@ All macOS numbers come from GitHub `macos-latest` runners (Apple M1 Virtual, 3 c
 
 ## Windows
 
-All Windows numbers come from GitHub `windows-latest` runners with 4 logical CPUs, an administrator account and Microsoft Defender real-time monitoring off. Cold `C:\Program Files` has 304,060 items and 38,287 directories. The master file table (MFT) read depends on the CPU type of the runner. We read one job per CPU type in [run 37926570626](https://github.com/OriginalMHV/minimenta/actions/runs/37926570626). The median MFT-only time of a round (after round 0) was 3.5 to 3.8 s on AMD EPYC 7763, 3.5 to 4.7 s on AMD EPYC 9V74 and 6.9 to 10.5 s on Intel Xeon 8573C.
+All Windows numbers come from GitHub `windows-latest` runners with 4 logical CPUs, an administrator account and Microsoft Defender real-time monitoring off. Cold `C:\Program Files` has 304,060 items ([run 37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270)) and 38,287 directories ([run 37854569797](https://github.com/OriginalMHV/minimenta/actions/runs/37854569797)). The master file table (MFT) read depends on the CPU type of the runner. We read one job per CPU type in [run 37926570626](https://github.com/OriginalMHV/minimenta/actions/runs/37926570626). The median MFT-only time of a round (after round 0) was 3.5 to 3.8 s on AMD EPYC 7763, 3.5 to 4.7 s on AMD EPYC 9V74 and 6.9 to 10.5 s on Intel Xeon 8573C.
 
 | Idea | Status | Result | Evidence |
 | --- | --- | --- | --- |
@@ -222,7 +222,7 @@ These ideas came up in research or review and nobody has measured them. "Interna
 - A cold A/B run of the final [#23](https://github.com/OriginalMHV/minimenta/pull/23) code on a data-volume tree. The only cold point is the 0.73x of the first variant ([run 37850881974](https://github.com/OriginalMHV/minimenta/actions/runs/37850881974)).
 - Explain why the total for `mm /` is still 16.7 GiB (7%) above the sum of `df` after [#31](https://github.com/OriginalMHV/minimenta/pull/31). Candidates that [#31](https://github.com/OriginalMHV/minimenta/pull/31) names: APFS clones count in full for each copy, and the cryptex disk images count twice.
 - Refuse or warn on `d` and `D` for the `>` rows of firmlinked data folders. Trashing `/System/Volumes/Data/Users` removes the real home folders. `src/ui/browser.rs` has no `OTHER_FS` check. Source: review of [#28](https://github.com/OriginalMHV/minimenta/pull/28) (internal notes).
-- Bump `VERSION` in `src/cache.rs` (it is still 4) or store how firmlinks were handled. A cache of `/` written before [#31](https://github.com/OriginalMHV/minimenta/pull/31) keeps the doubled data volume until the 7-day limit or `r`. This matters only for builds from before the first release.
+- Bump `VERSION` in `src/cache.rs` (it is still 4 on main at [`b1c0edd`](https://github.com/OriginalMHV/minimenta/commit/b1c0edd)) or store how firmlinks were handled. A cache of `/` written before [#31](https://github.com/OriginalMHV/minimenta/pull/31) keeps the doubled data volume until the 7-day limit or `r`. This matters only for builds from before the first release.
 - Handle dataless files and File Provider folders. `src` has no handling, and the effect on `getattrlistbulk` is unverified. Source: internal notes.
 - Switch off the autofs trigger policy (`IOPOL_TYPE_VFS_TRIGGER_RESOLVE`) during the scan. Source: internal notes.
 - Test cache cases that the reviews did not cover: purged FSEvents history, `.fseventsd/no_log`, network volumes, symlinks swapped with directories, and changes during the replay. Source: internal notes.
@@ -236,7 +236,7 @@ These ideas came up in research or review and nobody has measured them. "Interna
 - Elevated relaunch for limited administrators, in the style of WinDirStat. It needs an owner decision and a manual test with a real limited token, because CI runs elevated. [#27](https://github.com/OriginalMHV/minimenta/pull/27) shipped a hint as the cheap alternative.
 - `FSCTL_FILE_PREFETCH` with `FILE_PREFETCH_TYPE_FOR_DIRENUM`, to let the kernel batch directory metadata reads without administrator rights. Drop it if the gain is under 1.3x or a standard token gets `ACCESS_DENIED`. Source: internal notes.
 - Test the claim that a standard user can read the MFT of a non-system NTFS volume. It needs no code change. CI cannot test it, because the runner is an administrator. Source: a forum report, internal notes.
-- Sample random MFT records with `FSCTL_GET_NTFS_FILE_RECORD` to estimate the size of a folder. It would add about 100 to 300 ms of random reads. The random-path estimate on directory trees failed ([#34](https://github.com/OriginalMHV/minimenta/pull/34)), but this variant was never run.
+- Sample random MFT records with `FSCTL_GET_NTFS_FILE_RECORD` to estimate the size of a folder. It would add about 100 to 300 ms of random reads (an estimate from internal notes). The random-path estimate on directory trees failed ([#34](https://github.com/OriginalMHV/minimenta/pull/34)), but this variant was never run.
 - A setting `--mft=auto|always|never`. Only `--no-mft` exists.
 - An adaptive MFT reader that starts with few or small reads and ramps up, or yields to the listing while the listing makes progress. Fixed block sizes, thread counts and priority hints failed, but no adaptive scheme was tried.
 - A stored hint of the last scan time per folder to choose the MFT start on repeat scans. It cannot help the first cold scan.
