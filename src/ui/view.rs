@@ -12,6 +12,10 @@ use crate::tree::{Dir, Entry, Kind, SortKey, flag, format_size};
 
 const BAR_WIDTH: usize = 10;
 
+/// Rows that stay visible above and below the cursor while it moves, so the
+/// next items show before the cursor reaches the edge of the screen.
+const SCROLL_MARGIN: usize = 5;
+
 /// The mint accent of the logo (#44B78F), as the closest 256-color index so it
 /// also works in terminals without true color.
 pub const ACCENT: Color = Color::Indexed(72);
@@ -48,21 +52,32 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
     frame.render_widget(Line::from(format!("{title}{fill}")).dark_gray(), path);
 
     b.list_height = list.height as usize;
-    let len = b.dir().entries.len();
-    if b.cursor < b.offset {
-        b.offset = b.cursor;
-    } else if b.cursor >= b.offset + b.list_height {
-        b.offset = b.cursor + 1 - b.list_height;
-    }
-    b.offset = b.offset.min(len.saturating_sub(b.list_height));
+    b.offset = scroll(b.offset, b.cursor, b.list_height, b.dir().entries.len());
     draw_list(frame, b, list);
-    frame.render_widget(footer_line(b), footer);
+    frame.render_widget(footer_line(b, footer.width as usize), footer);
 
     match &b.mode {
         Mode::Browse => {}
         Mode::Help => draw_help(frame),
         Mode::Confirm { permanent, targets } => draw_confirm(frame, b, *permanent, targets),
     }
+}
+
+/// The first visible row for `cursor` on a screen of `height` rows, starting
+/// from the current `offset`. The screen moves only when the cursor comes
+/// within `SCROLL_MARGIN` rows of an edge, and the margin is at most a third
+/// of the screen. At the start and the end of the list the margin shrinks, so
+/// the first and the last row stay reachable.
+fn scroll(offset: usize, cursor: usize, height: usize, len: usize) -> usize {
+    let margin = SCROLL_MARGIN.min(height.saturating_sub(1) / 3);
+    let offset = if cursor < offset + margin {
+        cursor.saturating_sub(margin)
+    } else if cursor + margin >= offset + height {
+        (cursor + margin + 1).saturating_sub(height)
+    } else {
+        offset
+    };
+    offset.min(len.saturating_sub(height))
 }
 
 fn draw_list(frame: &mut Frame, b: &Browser, area: Rect) {
@@ -177,7 +192,7 @@ fn tail(text: &str, max: usize) -> String {
     format!("…{}", text.chars().skip(len - keep).collect::<String>())
 }
 
-fn footer_line(b: &Browser) -> Line<'static> {
+fn footer_line(b: &Browser, width: usize) -> Line<'static> {
     if let Some(message) = &b.message {
         return bar(&format!(" {message}"));
     }
@@ -205,7 +220,25 @@ fn footer_line(b: &Browser) -> Line<'static> {
         (SortKey::Items, _) => "items",
     };
     let _ = write!(text, "   |  Sorted by {sort}");
+    let len = b.dir().entries.len();
+    if len > 0 {
+        let position = format!("{}/{len} ", b.cursor + 1);
+        text = right_align(text, &position, width);
+    }
     bar(&text)
+}
+
+/// Puts `right` at the right edge of a line of `width` columns, after `text`.
+/// When both do not fit, `right` follows `text` after a separator.
+fn right_align(mut text: String, right: &str, width: usize) -> String {
+    let used = text.chars().count() + right.chars().count();
+    if used + 3 <= width {
+        text.push_str(&" ".repeat(width - used));
+    } else {
+        text.push_str("   |  ");
+    }
+    text.push_str(right);
+    text
 }
 
 fn popup(frame: &mut Frame, width: u16, height: u16, title: &str, border: Color) -> Rect {
@@ -316,7 +349,50 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
 
 #[cfg(test)]
 mod tests {
-    use super::tail;
+    use super::{right_align, scroll, tail};
+
+    #[test]
+    fn moving_down_keeps_five_rows_below_the_cursor() {
+        // 70 rows on screen, 400 items.
+        assert_eq!(scroll(0, 64, 70, 400), 0);
+        assert_eq!(scroll(0, 65, 70, 400), 1);
+        assert_eq!(scroll(1, 66, 70, 400), 2);
+    }
+
+    #[test]
+    fn moving_up_keeps_five_rows_above_the_cursor() {
+        assert_eq!(scroll(100, 105, 70, 400), 100);
+        assert_eq!(scroll(100, 104, 70, 400), 99);
+        assert_eq!(scroll(3, 2, 70, 400), 0);
+    }
+
+    #[test]
+    fn the_margin_shrinks_at_the_ends_of_the_list() {
+        assert_eq!(scroll(0, 0, 70, 400), 0);
+        assert_eq!(scroll(330, 399, 70, 400), 330);
+        assert_eq!(scroll(0, 9, 70, 10), 0);
+    }
+
+    #[test]
+    fn a_short_screen_keeps_at_most_a_third_as_margin() {
+        // 7 rows: the margin is 2, so the cursor scrolls at row 5.
+        assert_eq!(scroll(0, 4, 7, 100), 0);
+        assert_eq!(scroll(0, 5, 7, 100), 1);
+        // 2 rows: no margin.
+        assert_eq!(scroll(0, 1, 2, 100), 0);
+    }
+
+    #[test]
+    fn the_position_sits_at_the_right_edge_when_it_fits() {
+        assert_eq!(
+            right_align(" Items: 3".into(), "2/5 ", 20),
+            " Items: 3       2/5 "
+        );
+        assert_eq!(
+            right_align(" Items: 3".into(), "2/5 ", 12),
+            " Items: 3   |  2/5 "
+        );
+    }
 
     #[test]
     fn long_paths_keep_their_end() {

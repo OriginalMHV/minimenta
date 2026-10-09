@@ -45,7 +45,7 @@ mm --summary ~/code          # print the totals without the interface
 `mm` and `minimenta` are the same program.
 
 1. The prompt shows the current folder. Press Enter to scan it, or type another path. Tab completes folder names and Ctrl+U clears the line.
-2. The browser lists the items in the folder, largest first. Open a folder with Enter and go back with Left.
+2. The browser lists the items in the folder, largest first. Open a folder with Enter and go back with Left. The list keeps five rows visible above and below the cursor, and the bottom bar shows the row of the cursor, for example `34/412`.
 3. Select the items you do not need, then press `d` to move them to the Trash or `D` to delete them permanently.
 
 Press Esc during a scan to cancel it, or `q` to quit.
