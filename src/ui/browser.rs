@@ -157,6 +157,9 @@ impl Browser {
                 };
                 return match key.code {
                     KeyCode::Char('y' | 'Y') => Action::Delete { permanent, targets },
+                    // Enter also opens folders, so a habit press must not
+                    // delete for good. A move to the Trash can be undone.
+                    KeyCode::Enter if !permanent => Action::Delete { permanent, targets },
                     _ => Action::None,
                 };
             }
@@ -600,6 +603,21 @@ mod tests {
         fresh.push(b"large", Kind::File, 1 << 20, 1 << 20, 0);
         browser.replace_current(fresh);
         assert_eq!(name_at_cursor(&browser), b"large");
+    }
+
+    #[test]
+    fn enter_confirms_a_move_to_the_trash_but_not_a_permanent_delete() {
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut browser = browser_with(in_disk_order());
+        for (permanent, deletes) in [(false, true), (true, false)] {
+            browser.mode = Mode::Confirm {
+                permanent,
+                targets: vec![0],
+            };
+            let action = browser.handle(enter);
+            assert_eq!(matches!(action, Action::Delete { .. }), deletes);
+            assert!(matches!(browser.mode, Mode::Browse));
+        }
     }
 
     #[test]
