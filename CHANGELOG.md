@@ -27,6 +27,7 @@ minimenta has no release yet. The Unreleased section lists what version 0.1.0 co
 ### Changed
 
 - Linux: a folder with hundreds of thousands of files scans faster. minimenta splits the file stat calls for the later parts of such a folder across threads. Before, one thread did all of them. Esc stops the listing of such a folder, and the memory that the listing uses stays bounded. Scans of ordinary folders do not change.
+- Linux: a cold scan reads the folders in random order. Before, the threads followed the tree and read neighbouring folders at the same time, and the disk served fewer requests per second. A scan that keeps the CPUs busy, such as a scan of a cached tree, does not change. On GitHub runners with a virtual disk, a cold scan of `/usr` took 0.90x (SCSI disk) and 0.87x (NVMe disk) of the time of the earlier scanner. It took 0.93x and 0.90x of the time of `ncdu -t 64`. Memory use and the number of open files do not change.
 - macOS: a scan skips empty folders on the system volume without opening them. This makes a scan of `/System/Library` faster. An empty system folder that you may not read is no longer reported as a read error, because minimenta never opens it. Scans of the data volume do not change.
 - macOS: a repeat scan lists folders with hard-linked files again only when links may have changed. Before, it listed them every time, which made repeat scans of trees such as `Xcode.app` slow.
 - macOS: a repeat scan decodes the cache while it reads the FSEvents history. This makes repeat scans of large trees faster.
