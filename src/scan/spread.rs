@@ -49,8 +49,8 @@ const WINDOW_ITEMS: u64 = 4096;
 /// Weight of the windows before the last one in the smoothed busy share.
 const KEEP: f64 = 0.5;
 /// A scan turns cold when the smoothed busy share falls below this value.
-/// Warm scans of `/usr` kept 85% or more of the CPUs busy in 95% of the
-/// windows, and cold ones 24% to 40% in half of them.
+/// Warm scans of `/usr` kept at least 85% of the CPUs busy in 95% of the
+/// windows. The median window of a cold scan kept 26% to 40% busy.
 const ENTER_COLD: f64 = 0.55;
 /// A cold scan turns warm again above this value.
 const LEAVE_COLD: f64 = 0.75;
