@@ -160,6 +160,25 @@ impl Dir {
             .any(|e| e.has(flag::ERROR | flag::SUB_ERROR))
     }
 
+    /// Removes entry `i` and returns it with its name, so `insert` can put it
+    /// back later, also into a fresh listing of the same folder.
+    pub fn take(&mut self, i: usize) -> (Vec<u8>, Entry) {
+        let e = self.entries.remove(i);
+        (self.name(&e).to_vec(), e)
+    }
+
+    /// Adds an entry that `take` removed and returns its new id. The order
+    /// becomes stale.
+    pub fn insert(&mut self, name: &[u8], mut e: Entry) -> u32 {
+        e.name_start = self.names.len() as u32;
+        e.name_len = name.len() as u32;
+        self.names.extend_from_slice(name);
+        let id = e.id();
+        self.entries.push(e);
+        self.sort = None;
+        id
+    }
+
     /// Stores a scanned subdirectory in entry `i` and sets the entry's sizes
     /// to the totals of `sub`, which include `sub.own_disk`.
     pub fn attach(&mut self, i: usize, sub: Dir, flags: u8) {
