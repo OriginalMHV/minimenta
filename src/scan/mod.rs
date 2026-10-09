@@ -83,6 +83,30 @@ fn dev_ino(_: &fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
+/// The root of the tree that the user browses, set once its first scan is
+/// done. A rescan lists a folder inside it and must still leave out the data
+/// folders that the tree counts at their firmlinks (macOS).
+#[cfg(target_os = "macos")]
+static TREE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Records the root of the browsed tree. Later scans inside it use it to
+/// decide which firmlinks the tree already counts.
+pub fn set_tree_root(root: &Path) {
+    #[cfg(target_os = "macos")]
+    let _ = TREE_ROOT.set(root.to_path_buf());
+    #[cfg(not(target_os = "macos"))]
+    let _ = root;
+}
+
+/// The root that decides which firmlinks a scan of `path` counts: the tree
+/// root when `path` lies inside it, else `path` itself.
+#[cfg(target_os = "macos")]
+fn firmlink_root<'a>(path: &'a Path, tree_root: Option<&'a Path>) -> &'a Path {
+    tree_root
+        .filter(|root| path.starts_with(root))
+        .unwrap_or(path)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub one_fs: bool,
@@ -313,7 +337,7 @@ fn list(
         one_fs: opts.one_fs,
         root_dev: dev_ino(meta).0,
         #[cfg(target_os = "macos")]
-        root: path,
+        root: firmlink_root(path, TREE_ROOT.get().map(std::path::PathBuf::as_path)),
         progress,
         hardlinks: Mutex::default(),
         stop,
@@ -388,7 +412,7 @@ pub fn update(
         one_fs: opts.one_fs,
         root_dev: dev_ino(&meta).0,
         #[cfg(target_os = "macos")]
-        root,
+        root: firmlink_root(root, TREE_ROOT.get().map(std::path::PathBuf::as_path)),
         progress,
         hardlinks: Mutex::default(),
         stop: &AtomicBool::new(false),
@@ -672,6 +696,25 @@ mod tests {
     use crate::tree::Kind;
     use std::fs::File;
     use std::io::Write;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rescan_inside_the_tree_uses_the_tree_root_for_firmlinks() {
+        let p = Path::new;
+        let data = p("/System/Volumes/Data");
+        assert_eq!(firmlink_root(data, Some(p("/"))), p("/"));
+        assert_eq!(firmlink_root(data, None), data);
+        assert_eq!(
+            firmlink_root(p("/Volumes/Other"), Some(p("/Users/me"))),
+            p("/Volumes/Other"),
+            "a scan outside the tree keeps its own root"
+        );
+        assert_eq!(
+            firmlink_root(p("/Users/meow"), Some(p("/Users/me"))),
+            p("/Users/meow"),
+            "a shared name prefix is not inside the tree"
+        );
+    }
 
     fn opts() -> Options {
         Options {
