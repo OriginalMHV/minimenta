@@ -277,7 +277,7 @@ def description(blocks):
     parts = []
     for block in blocks:
         values = ", ".join(f"{row.label.rstrip('*')} {row.text}" for row in block["rows"])
-        parts.append(f"{block['name']}: {values}.")
+        parts.append(f"{block['name']}: {block['note'] + ' ' if block['note'] else ''}{values}.")
     return "Speed relative to ncdu with its default settings. Longer is faster. " + " ".join(parts)
 
 
@@ -348,31 +348,29 @@ def verdict_text(series, ratio, q1, q3):
 
 
 def runs_table(runs):
-    rows = []
+    run_rows, runner_rows = [], []
     for run in runs:
+        repo = next((info.get("repository") for info in run.platforms.values() if info.get("repository")), "OriginalMHV/minimenta")
+        head = run.doc.get("pull_request_head") or run.doc.get("commit") or ""
+        run_rows.append(
+            [
+                f"[{run.id}](https://github.com/{repo}/actions/runs/{run.id})",
+                run.date,
+                f"[`{head[:7]}`](https://github.com/{repo}/commit/{head})" if head else "n/a",
+            ]
+        )
         for platform, name in PLATFORMS:
             info = run.platforms.get(platform)
-            if not info:
-                continue
-            repo = info.get("repository", "OriginalMHV/minimenta")
-            head = run.doc.get("pull_request_head") or run.doc.get("commit") or ""
-            runner = info["runner"]
-            where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
-            rows.append(
-                [
-                    f"[{run.id}](https://github.com/{repo}/actions/runs/{run.id})",
-                    run.date,
-                    f"[`{head[:7]}`](https://github.com/{repo}/commit/{head})" if head else "n/a",
-                    where,
-                    runner["cpu"].replace("|", "/"),
-                    str(runner["cores"]),
-                ]
-            )
+            if info:
+                runner = info["runner"]
+                where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
+                runner_rows.append([run.id, where, runner["cpu"].replace("|", "/"), str(runner["cores"])])
     lines = ["**Runs**", ""]
-    lines += md_table(["Run", "Date", "Commit", "Platform", "Runner CPU", "Cores"], rows, ["---", "---", "---", "---", "---", "---:"])
-    lines += ["", "Times are medians. Pairs shows all pairs, then the pairs in which minimenta was faster and the pairs in which the tool was faster. Speed is the value of the chart."]
+    lines += md_table(["Run", "Date", "Commit"], run_rows)
     if any(run.doc.get("pull_request_head") for run in runs):
-        lines += ["The commit of a pull request run is the head of the pull request."]
+        lines += ["", "The commit of a pull request run is the head of the pull request."]
+    lines += ["", *md_table(["Run", "Runner", "CPU", "Cores"], runner_rows, ["---", "---", "---", "---:"])]
+    lines += ["", "Times are medians. Pairs shows all pairs, then the pairs in which minimenta was faster and the pairs in which the tool was faster. Speed is the value of the chart."]
     return lines
 
 

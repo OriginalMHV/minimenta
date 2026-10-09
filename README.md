@@ -103,14 +103,19 @@ The chart shows a speed relative to a baseline. The baseline is ncdu with its de
 
 **Runs**
 
-| Run | Date | Commit | Platform | Runner CPU | Cores |
-| --- | --- | --- | --- | --- | ---: |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | macOS | Apple M1 (Virtual) | 3 |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Linux | AMD EPYC 7763 64-Core Processor | 4 |
-| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) | Windows, administrator | AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD | 4 |
+| Run | Date | Commit |
+| --- | --- | --- |
+| [37904223270](https://github.com/OriginalMHV/minimenta/actions/runs/37904223270) | 2026-10-09 | [`d22ae1c`](https://github.com/OriginalMHV/minimenta/commit/d22ae1c474e9dc201ecd657c9f1806448a948b8e) |
+
+The commit of a pull request run is the head of the pull request.
+
+| Run | Runner | CPU | Cores |
+| --- | --- | --- | ---: |
+| 37904223270 | macOS | Apple M1 (Virtual) | 3 |
+| 37904223270 | Linux | AMD EPYC 7763 64-Core Processor | 4 |
+| 37904223270 | Windows, administrator | AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD | 4 |
 
 Times are medians. Pairs shows all pairs, then the pairs in which minimenta was faster and the pairs in which the tool was faster. Speed is the value of the chart.
-The commit of a pull request run is the head of the pull request.
 
 **First scan of a cold disk, macOS, `/opt/homebrew`**
 
