@@ -350,10 +350,7 @@ fn list(
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
-    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-    let (mut dir, result) = pool.install(|| spread::scan_tree(&ctx, &root, dev_ino(meta).1));
-    #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, &root, 0, dev_ino(meta).1));
+    let (mut dir, result) = pool.install(|| scan_root(&ctx, &root, dev_ino(meta).1));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -372,6 +369,18 @@ fn list(
             Ok(dir)
         }
     }
+}
+
+/// Scans the tree below `root`. Linux on 64-bit targets spreads the reads of
+/// a cold scan over the disk. The other targets follow the tree.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn scan_root(ctx: &Ctx, root: &NativePath, id: u64) -> (Dir, io::Result<()>) {
+    spread::scan_tree(ctx, root, id)
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn scan_root(ctx: &Ctx, root: &NativePath, id: u64) -> (Dir, io::Result<()>) {
+    scan_dir(ctx, root, 0, id)
 }
 
 /// A subdirectory found by `read_dir`, to be scanned next.
