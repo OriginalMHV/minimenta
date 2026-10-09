@@ -577,7 +577,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         build(tmp.path());
         let locked = tmp.path().join("wide/000");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         let (progress, stop) = (Progress::default(), AtomicBool::new(false));
         let ctx = ctx(&progress, &stop);
 
