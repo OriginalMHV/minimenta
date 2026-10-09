@@ -90,7 +90,7 @@ elif [ "$platform" = macos ]; then
   export HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
   brew install ncdu
   ln -sf "$(brew --prefix ncdu)/bin/ncdu" "$bin/ncdu"
-  brew info ncdu | head -3
+  brew list --versions ncdu
 fi
 
 fetch "https://github.com/dundee/gdu/releases/download/v$GDU_VERSION/$GDU_ASSET" "$work/gdu/$GDU_ASSET" "$GDU_SHA256"
@@ -116,7 +116,6 @@ fi
 echo "-- installed tools in $bin"
 for tool in ncdu gdu dua dust; do
   [ -e "$bin/$tool$ext" ] || continue
-  printf '%s: ' "$tool"
-  "$bin/$tool$ext" --version 2>&1 | head -n 2 | tr '\n' ' '
-  echo
+  version=$("$bin/$tool$ext" --version 2>&1 || true)
+  printf '%s: %s\n' "$tool" "$(printf '%s\n' "$version" | head -n 2 | tr '\n' ' ')"
 done

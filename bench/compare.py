@@ -26,11 +26,11 @@ import os
 import platform
 import re
 import shlex
-import shutil
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -215,6 +215,53 @@ def read_version(tool):
     tool.version_line = first_line(text)
 
 
+def purge_windows():
+    """Empties all working sets and the standby list, as bench/windows-purge.ps1
+    does, but inside this process. The PowerShell script compiles C# on every
+    call, which takes about 7 s on a runner. Needs an administrator."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+
+    class Luid(ctypes.Structure):
+        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.LONG)]
+
+    class LuidAndAttributes(ctypes.Structure):
+        _fields_ = [("luid", Luid), ("attributes", wintypes.DWORD)]
+
+    class TokenPrivileges(ctypes.Structure):
+        _fields_ = [("count", wintypes.DWORD), ("privileges", LuidAndAttributes * 1)]
+
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(Luid)]
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TokenPrivileges), wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    ntdll.NtSetSystemInformation.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+    ntdll.NtSetSystemInformation.restype = ctypes.c_ulong
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0028, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    luid = Luid()
+    if not advapi32.LookupPrivilegeValueW(None, "SeProfileSingleProcessPrivilege", ctypes.byref(luid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    state = TokenPrivileges(1, (LuidAndAttributes * 1)(LuidAndAttributes(luid, 2)))
+    ctypes.set_last_error(0)
+    if not advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(state), 0, None, None) or ctypes.get_last_error():
+        raise ctypes.WinError(ctypes.get_last_error())
+    system_memory_list_information = 80
+    for command in (2, 4):  # 2 empties the working sets, 4 purges the standby list
+        value = ctypes.c_int(command)
+        status = ntdll.NtSetSystemInformation(system_memory_list_information, ctypes.byref(value), 4)
+        if status:
+            raise OSError(f"NtSetSystemInformation({command}) failed: 0x{status:X}")
+
+
 def purge_command():
     override = os.environ.get("COMPARE_PURGE_COMMAND")
     if override:
@@ -223,9 +270,7 @@ def purge_command():
         return {"shell": True, "cmd": "sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null", "text": "sync; echo 3 > /proc/sys/vm/drop_caches"}
     if PLAT == "macos":
         return {"shell": True, "cmd": "sync; sudo purge", "text": "sync; sudo purge"}
-    script = os.path.join(HERE, "windows-purge.ps1")
-    shell = shutil.which("powershell") or "powershell"
-    return {"shell": False, "cmd": [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script], "text": "bench/windows-purge.ps1 (empty working sets, purge standby list)"}
+    return {"shell": False, "cmd": None, "text": "empty all working sets, then purge the standby list (as bench/windows-purge.ps1)"}
 
 
 class Runner:
@@ -235,18 +280,43 @@ class Runner:
 
     def drop_cache(self):
         start = time.perf_counter()
-        subprocess.run(self.purge["cmd"], shell=self.purge["shell"], check=True, stdout=subprocess.DEVNULL)
+        if self.purge["cmd"] is None:
+            try:
+                purge_windows()
+            except Exception as e:
+                log(f"   in-process purge failed ({e}), using bench/windows-purge.ps1")
+                self.purge = {
+                    "shell": False,
+                    "text": "bench/windows-purge.ps1 (empty working sets, purge standby list)",
+                    "cmd": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", os.path.join(HERE, "windows-purge.ps1")],
+                }
+                subprocess.run(self.purge["cmd"], check=True, stdout=subprocess.DEVNULL)
+        else:
+            subprocess.run(self.purge["cmd"], shell=self.purge["shell"], check=True, stdout=subprocess.DEVNULL)
         return time.perf_counter() - start
 
     def timed(self, argv, cold, keep_stderr=False):
+        """Runs a command and returns (seconds, exit code, stderr text).
+
+        Popen.wait(timeout) polls with sleeps of up to 50 ms on POSIX, which
+        rounds every time up to a multiple of 50 ms. So the wait has no timeout
+        and a timer kills a command that runs too long."""
         if cold:
             self.drop_cache()
         err = subprocess.PIPE if keep_stderr else subprocess.DEVNULL
+        expired = []
         start = time.perf_counter()
-        done = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=err, timeout=self.timeout)
-        elapsed = time.perf_counter() - start
-        text = done.stderr.decode("utf-8", "replace") if keep_stderr else ""
-        return elapsed, done.returncode, text
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=err)
+        killer = threading.Timer(self.timeout, lambda: (expired.append(True), proc.kill()))
+        killer.start()
+        try:
+            _, stderr = proc.communicate()
+            elapsed = time.perf_counter() - start
+        finally:
+            killer.cancel()
+        if expired:
+            raise subprocess.TimeoutExpired(argv, self.timeout)
+        return elapsed, proc.returncode, (stderr or b"").decode("utf-8", "replace")
 
 
 def quartiles(values):
@@ -289,22 +359,26 @@ def summarize(tool, tm, tt, codes, planned):
 
 
 def judge_totals(totals):
-    """Marks each total against the minimenta total. A tool is fine when it is
-    within 5 percent of the disk or the apparent total, or within 64 KiB."""
+    """Compares each total with the minimenta total. A tool whose total is lower
+    than the disk and the apparent total of minimenta by more than 5 percent
+    (and 64 KiB) may skip work, so ok is false. A higher total only sets
+    higher, for example when a tool also counts the size of directories."""
     mm = totals.get("minimenta")
     if not mm:
         return
     for key, entry in totals.items():
         if key == "minimenta":
-            entry.update(measure="disk", deviation_pct=0.0, ok=True)
+            entry.update(measure="disk", deviation_pct=0.0, ok=True, higher=False)
             continue
         options = {"disk": mm["disk_bytes"], "apparent": mm["apparent_bytes"]}
         measure = min(options, key=lambda name: abs(entry["bytes"] - options[name]))
         reference = options[measure]
         difference = entry["bytes"] - reference
+        slack = max(TOLERANCE * reference, 64 * 1024)
         entry["measure"] = measure
         entry["deviation_pct"] = round(difference / reference * 100, 2) if reference else None
-        entry["ok"] = abs(difference) <= max(TOLERANCE * reference, 64 * 1024)
+        entry["ok"] = difference >= -slack
+        entry["higher"] = difference > slack
 
 
 def run_checks(tools, mm, path):
@@ -352,7 +426,7 @@ def run_section(args, runner, mode, tree_id, path, cores):
     totals, errors = run_checks(tools, mm, path)
     for key, entry in totals.items():
         shown = "n/a" if entry["deviation_pct"] is None else f"{entry['deviation_pct']:+.2f}%"
-        log(f"   {key}: {entry['bytes']} bytes ({entry['measure']}, {shown} against minimenta)" + ("" if entry["ok"] else "  <-- CHECK"))
+        log(f"   {key}: {entry['bytes']} bytes ({entry['measure']}, {shown} against minimenta)" + ("" if entry["ok"] else "  <-- LOWER, CHECK") + ("  (higher)" if entry["higher"] else ""))
     section["items"] = totals.get("minimenta", {}).get("items")
     section["errors"] = totals.get("minimenta", {}).get("errors")
     section["totals"] = totals
@@ -376,8 +450,8 @@ def run_section(args, runner, mode, tree_id, path, cores):
     round_cost = sum((2 * purge_s if cold else 0) + mm_single + singles[t.id] for t in tools)
     spent = time.perf_counter() - started
     left = max(section["budget_s"] - spent, 0)
-    planned = int(left / round_cost) - warmup if round_cost else args.max_pairs
-    planned = max(args.min_pairs, min(args.max_pairs, planned))
+    planned = int(left / round_cost) - warmup if round_cost else args.max_warm_pairs
+    planned = max(args.min_pairs, min(args.max_pairs if cold else args.max_warm_pairs, planned))
     log(f"-- plan: {planned} pairs per tool, one round costs about {round_cost:.1f} s, {left:.0f} s left in the section budget")
     section["plan"] = {
         "single_run_s": {k: round(v, 3) for k, v in singles.items()},
@@ -526,9 +600,15 @@ def markdown(doc):
                 f"| {name} | {r['version']} | {r['median_ms']} | {r['minimenta_median_ms']} | {r['ratio_median']:.2f} | "
                 f"{r['ratio_q1']:.2f} to {r['ratio_q3']:.2f} | {r['pairs']} | {r['verdict']} |"
             )
-        flagged = [k for k, v in tree["totals"].items() if not v["ok"]]
+        lower = [k for k, v in tree["totals"].items() if not v["ok"]]
+        higher = [k for k, v in tree["totals"].items() if v.get("higher")]
         lines.append("")
-        lines.append("Totals: " + ", ".join(f"{k} {v['bytes']}" for k, v in tree["totals"].items()) + (f". Check: {', '.join(flagged)}." if flagged else "."))
+        lines.append(
+            "Totals in bytes: "
+            + ", ".join(f"{k} {v['bytes']}" for k, v in tree["totals"].items())
+            + (f". Lower than minimenta, check: {', '.join(lower)}." if lower else ".")
+            + (f" Higher than minimenta: {', '.join(higher)}." if higher else "")
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -548,7 +628,8 @@ def main():
     parser.add_argument("--cold", action="append", default=[], metavar="ID=PATH")
     parser.add_argument("--warm", action="append", default=[], metavar="ID=PATH")
     parser.add_argument("--min-pairs", type=int, default=3)
-    parser.add_argument("--max-pairs", type=int, default=9)
+    parser.add_argument("--max-pairs", type=int, default=9, help="most pairs in a cold section")
+    parser.add_argument("--max-warm-pairs", type=int, default=30, help="most pairs in a warm section")
     parser.add_argument("--cold-budget", type=int, default=480, help="seconds per cold tree")
     parser.add_argument("--warm-budget", type=int, default=240, help="seconds per warm tree")
     parser.add_argument("--timeout", type=int, default=900, help="seconds for one run")

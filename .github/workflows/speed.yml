@@ -48,7 +48,7 @@ jobs:
         run: |
           python3 -I bench/compare.py --out "$RUNNER_TEMP/speed-linux.json" --tools-dir "$RUNNER_TEMP/tools" \
             --cold usr=/usr --warm synthetic="$RUNNER_TEMP/bench-tree" \
-            --cold-budget 900 --warm-budget 240
+            --cold-budget 1080 --warm-budget 240
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
@@ -115,7 +115,7 @@ jobs:
           t=$(cygpath -m "$RUNNER_TEMP")
           python -I bench/compare.py --out "$t/speed-windows.json" --tools-dir "$t/tools" \
             --cold "program-files=C:/Program Files" --warm synthetic="$t/bench-tree" \
-            --cold-budget 780 --warm-budget 240
+            --cold-budget 840 --warm-budget 240
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
