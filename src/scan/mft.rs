@@ -28,6 +28,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::Progress;
+use super::mft_start::same_folder;
 use super::ntfs::{Part, Table, apply_fixups, mft_extents, parse_boot, parse_record};
 use crate::tree::Dir;
 use rayon::prelude::*;
@@ -205,19 +206,6 @@ fn ntfs_mount_point(root: &Path) -> Option<[u16; 1024]> {
 pub(super) fn is_volume_root(root: &Path) -> bool {
     ntfs_mount_point(root)
         .is_some_and(|mount| same_folder(until_nul(&mount), until_nul(&volume_query(root))))
-}
-
-/// Whether two Windows paths name the same folder when they differ at most in
-/// case and in trailing separators. The mount point from `GetVolumePathNameW`
-/// ends in a backslash, and a canonical path does not.
-fn same_folder(a: &[u16], b: &[u16]) -> bool {
-    fn folded(path: &[u16]) -> Vec<char> {
-        let path = path.strip_suffix(&[u16::from(b'\\')]).unwrap_or(path);
-        char::decode_utf16(path.iter().copied())
-            .flat_map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER).to_lowercase())
-            .collect()
-    }
-    folded(a) == folded(b)
 }
 
 /// Whether running minimenta elevated would let it read the MFT of the
@@ -427,22 +415,6 @@ mod tests {
         assert!(
             link_flags.contains(&(crate::tree::flag::MULTI_LINK | crate::tree::flag::HARDLINK))
         );
-    }
-
-    fn utf16(s: &str) -> Vec<u16> {
-        s.encode_utf16().collect()
-    }
-
-    #[test]
-    fn mount_points_match_paths_in_case_and_trailing_separator() {
-        let same = |a: &str, b: &str| same_folder(&utf16(a), &utf16(b));
-        assert!(same(r"C:\", "C:"));
-        assert!(same(r"C:\", r"c:\"));
-        assert!(same(r"C:\Mnt\Data\", r"c:\mnt\data"));
-        assert!(same(r"D:\Mnt\Å\", r"d:\mnt\å"));
-        assert!(!same(r"C:\", r"C:\Windows"));
-        assert!(!same(r"C:\Mnt\Data\", r"C:\Mnt"));
-        assert!(!same(r"C:\", r"D:\"));
     }
 
     #[test]

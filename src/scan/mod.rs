@@ -204,6 +204,7 @@ fn race(path: &Path, opts: &Options, progress: &Progress, meta: &fs::Metadata) -
                 progress,
                 &mft_progress.cancel,
                 volume_root,
+                start,
                 mft_start::FOLDER_DELAY,
             ) {
                 return Ok(None);

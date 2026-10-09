@@ -1,6 +1,7 @@
 //! Decides when the Windows scanner starts the NTFS master file table (MFT)
 //! reader next to the directory listing. The decision is pure, so its tests
-//! need no clock and no disk, and they run on every platform.
+//! need no clock and no disk, and they run on every platform. The path
+//! comparison that finds the root of a volume is here for the same reason.
 //!
 //! The reader always reads the table of the whole volume, whatever the folder
 //! is. On the Windows runner, a table of 1.3 GB took about 3.9 s. The reader
@@ -23,13 +24,25 @@ use super::Progress;
 /// On the Windows runner, cold folders with 24,000 to 35,000 items listed in
 /// 1.0 s to 3.1 s. The slowest one shows the effect of the delay. With 2 s,
 /// the reader started in every run and the scan took 4.1 s to 4.6 s. With 3 s,
-/// the scan took 3.0 s to 3.5 s. The listing alone took 3.1 s.
+/// the scan took 3.0 s to 3.5 s. The listing alone took 3.0 s to 3.1 s.
+///
+/// The gain on that folder depends on the listing finishing before the delay.
+/// The listing time was close to the delay. The reader started in 1 of 7 runs
+/// on one runner and in 6 of 8 runs on another, and the gain fell from 0.79x
+/// to 0.89x of the time on main. A slower disk loses the gain.
 ///
 /// Large folders pay for the delay. A cold `C:\Program Files` with 304,000
 /// items took 6.8 s with 3 s, 5.7 s with 2 s and 3.9 s with an immediate
 /// reader. Without the reader it took 13.5 s to 14.2 s. A folder that lists in
 /// about 3 s still pays when the reader starts late, because the reader slows
-/// the end of the listing. The worst run took 7.0 s against 3.0 s.
+/// the end of the listing. The worst round took 7.0 s with 3 s, against 4.0 s
+/// on main and 3.0 s for the listing alone.
+///
+/// No folder between 35,000 and 304,000 items was measured, and no runner
+/// with a slow MFT read. Cold folders that list alone in about 3.5 s to 6.5 s
+/// may be the worst case, because the reader then starts at 3 s and still
+/// needs its full read. This is not measured. The value of 3 s is not proven
+/// for them.
 pub(super) const FOLDER_DELAY: Duration = Duration::from_secs(3);
 
 /// The listing rate is the item count of one window divided by its length.
@@ -54,6 +67,19 @@ pub(super) fn should_start(
     recent_rate: Option<f64>,
 ) -> bool {
     volume_root || (elapsed >= delay && recent_rate.is_some_and(|rate| rate < SLOW_RATE))
+}
+
+/// Whether two Windows paths name the same folder when they differ at most in
+/// case and in trailing separators. The mount point from `GetVolumePathNameW`
+/// ends in a backslash, and a canonical path does not.
+pub(super) fn same_folder(a: &[u16], b: &[u16]) -> bool {
+    fn folded(path: &[u16]) -> Vec<char> {
+        let path = path.strip_suffix(&[u16::from(b'\\')]).unwrap_or(path);
+        char::decode_utf16(path.iter().copied())
+            .flat_map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER).to_lowercase())
+            .collect()
+    }
+    folded(a) == folded(b)
 }
 
 /// Measures the listing rate from samples of the listed item count.
@@ -89,14 +115,15 @@ impl RateCheck {
 /// Waits until the MFT reader should start, and returns false when `done` is
 /// set first. The thread that sets `done` must unpark the waiting thread.
 /// Small and warm folders finish or list fast, so they pay nothing for the
-/// reader.
+/// reader. `start` is the time when the listing started, so the work of the
+/// caller before the wait counts against the delay.
 pub(super) fn wait(
     progress: &Progress,
     done: &AtomicBool,
     volume_root: bool,
+    start: Instant,
     delay: Duration,
 ) -> bool {
-    let start = Instant::now();
     let mut check = RateCheck::new(start);
     loop {
         if done.load(Relaxed) {
@@ -195,6 +222,7 @@ mod tests {
             &Progress::default(),
             &AtomicBool::new(false),
             true,
+            Instant::now(),
             FOLDER_DELAY
         ));
     }
@@ -205,6 +233,7 @@ mod tests {
             &Progress::default(),
             &AtomicBool::new(false),
             false,
+            Instant::now(),
             ms(300)
         ));
     }
@@ -216,8 +245,41 @@ mod tests {
                 &Progress::default(),
                 &AtomicBool::new(true),
                 volume_root,
+                Instant::now(),
                 FOLDER_DELAY
             ));
         }
+    }
+
+    #[test]
+    fn the_delay_counts_from_the_start_of_the_listing() {
+        let before = Instant::now();
+        let start = before
+            .checked_sub(Duration::from_secs(6))
+            .expect("the machine has run for more than 6 s");
+        assert!(wait(
+            &Progress::default(),
+            &AtomicBool::new(false),
+            false,
+            start,
+            Duration::from_secs(5)
+        ));
+        assert!(before.elapsed() < Duration::from_secs(2));
+    }
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn mount_points_match_paths_in_case_and_trailing_separator() {
+        let same = |a: &str, b: &str| same_folder(&utf16(a), &utf16(b));
+        assert!(same(r"C:\", "C:"));
+        assert!(same(r"C:\", r"c:\"));
+        assert!(same(r"C:\Mnt\Data\", r"c:\mnt\data"));
+        assert!(same(r"D:\Mnt\Å\", r"d:\mnt\å"));
+        assert!(!same(r"C:\", r"C:\Windows"));
+        assert!(!same(r"C:\Mnt\Data\", r"C:\Mnt"));
+        assert!(!same(r"C:\", r"D:\"));
     }
 }
