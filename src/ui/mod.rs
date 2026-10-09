@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::DefaultTerminal;
 
-use crate::scan::Options;
+use crate::scan::{self, Options};
 use crate::tree::Tree;
 use progress::Outcome;
 
@@ -38,6 +38,8 @@ fn run_screens(
         match progress::scan(terminal, &path, opts)? {
             Outcome::Done(scan) => {
                 let path = path.canonicalize().unwrap_or(path);
+                // Rescans inside this tree must count its firmlinks once.
+                scan::set_tree_root(&path);
                 let tree = Tree {
                     path,
                     dir: Box::new(scan.dir),
