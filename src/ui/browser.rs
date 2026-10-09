@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -42,7 +43,16 @@ pub struct Browser {
     changed: bool,
     /// Every move to the Trash in this session, the latest last, so `u` can
     /// put them back one after the other.
-    undo: Vec<Vec<trash::Trashed>>,
+    undo: Vec<UndoStep>,
+}
+
+/// One move to the Trash. The removed entries keep their sizes and subtrees,
+/// so undo puts them back in the tree without a rescan. `offset` is the
+/// scroll position at the delete, so undo shows the same screen again.
+struct UndoStep {
+    items: Vec<trash::Trashed>,
+    entries: Vec<(Vec<u8>, Entry)>,
+    offset: usize,
 }
 
 enum Action {
@@ -113,7 +123,7 @@ impl Browser {
                     self.delete(terminal, permanent, &targets)?;
                 }
                 Action::Rescan => self.rescan(terminal)?,
-                Action::Undo => self.undo(terminal)?,
+                Action::Undo => self.undo(),
             }
         }
     }
@@ -345,20 +355,16 @@ impl Browser {
         } else {
             trash::move_to_trash(&paths)
         };
-        let undoable = !trashed.is_empty();
-        if undoable {
-            self.undo.push(trashed);
-        }
-
         // Reconcile with the disk: drop what is gone, rescan what is still there.
         let mut pairs: Vec<(usize, PathBuf)> = targets.iter().copied().zip(paths).collect();
         pairs.sort_unstable_by_key(|&(i, _)| std::cmp::Reverse(i));
         let total = pairs.len();
         let mut gone = 0;
+        let mut removed = Vec::new();
         for (i, path) in pairs {
             let dir = self.tree.dir_at_mut(&self.stack);
             if path.symlink_metadata().is_err() {
-                dir.entries.remove(i);
+                removed.push(dir.take(i));
                 gone += 1;
             } else if dir.entries[i].dir.is_some()
                 && let Ok(sub) = scan::scan(&path, &self.opts, &Progress::default())
@@ -374,6 +380,14 @@ impl Browser {
         self.clear_selection();
         self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
         self.resort();
+        let undoable = !trashed.is_empty();
+        if undoable {
+            self.undo.push(UndoStep {
+                items: trashed,
+                entries: removed,
+                offset: self.offset,
+            });
+        }
 
         let done = if permanent {
             "Deleted"
@@ -388,30 +402,23 @@ impl Browser {
         Ok(())
     }
 
-    /// Puts the latest batch from the Trash back, then shows the folder it
-    /// came back to, with the cursor on the first restored item.
-    fn undo(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        let Some(batch) = self.undo.pop() else {
+    /// Puts the latest move to the Trash back, then shows the folder it came
+    /// back to, with the cursor on the first restored item.
+    fn undo(&mut self) {
+        let Some(step) = self.undo.pop() else {
             self.message = Some("Nothing to undo in this session".into());
-            return Ok(());
+            return;
         };
-        let first = batch
-            .first()
-            .and_then(|t| t.original.file_name())
-            .map(|n| n.as_encoded_bytes().to_vec());
-        let folder = batch
+        let folder = step
+            .items
             .first()
             .and_then(trash::parent_of)
             .map(Path::to_path_buf);
-        let result = trash::restore(&batch);
-        if let Some(stack) = folder.and_then(|f| self.stack_for(&f)) {
-            self.clear_selection();
-            self.stack = stack;
-            self.offset = 0;
-            self.rescan(terminal)?;
-            if let Some(i) = first.and_then(|name| self.dir().find(&name)) {
-                self.cursor = i;
-            }
+        let result = trash::restore(&step.items);
+        if let Some(folder) = folder
+            && let Some(stack) = self.stack_for(&folder)
+        {
+            self.put_back(&folder, stack, step.offset, step.entries);
         }
         let left = match self.undo.len() {
             0 => String::new(),
@@ -421,7 +428,58 @@ impl Browser {
             Ok(n) => format!("Restored {}.{left}", count(n)),
             Err(e) => format!("Could not restore everything: {e}.{left}"),
         });
-        Ok(())
+    }
+
+    /// Shows `folder` (at `stack`) and puts the entries that are on disk again
+    /// back into it, with the sizes and subtrees from before the move, so no
+    /// rescan is needed. The cursor goes to the first of them in the sorted
+    /// list. The screen scrolls back to `offset`, the position at the delete,
+    /// so the restored rows appear where they were. When that does not show
+    /// the cursor, the cursor goes to the middle of the screen.
+    fn put_back(
+        &mut self,
+        folder: &Path,
+        stack: Vec<usize>,
+        offset: usize,
+        entries: Vec<(Vec<u8>, Entry)>,
+    ) {
+        self.clear_selection();
+        self.stack = stack;
+        self.offset = offset;
+        let dir = self.tree.dir_at_mut(&self.stack);
+        let wanted: HashSet<&[u8]> = entries.iter().map(|(name, _)| name.as_slice()).collect();
+        // A new item with the same name may exist now. Keep it and skip ours.
+        let present: HashSet<Vec<u8>> = dir
+            .entries
+            .iter()
+            .map(|e| dir.name(e))
+            .filter(|name| wanted.contains(name))
+            .map(<[u8]>::to_vec)
+            .collect();
+        let mut restored = HashSet::new();
+        for (name, mut entry) in entries {
+            if present.contains(&name) || folder.join(os_name(&name)).symlink_metadata().is_err() {
+                continue;
+            }
+            entry.flags &= !flag::SELECTED;
+            restored.insert(dir.insert(&name, entry));
+        }
+        if restored.is_empty() {
+            return;
+        }
+        self.tree.refresh_totals(&self.stack);
+        self.changed = true;
+        self.range = None;
+        let sort = self.sort;
+        let dir = self.tree.dir_at_mut(&self.stack);
+        dir.sort(sort);
+        if let Some(i) = dir.entries.iter().position(|e| restored.contains(&e.id())) {
+            self.cursor = i;
+        }
+        let height = self.list_height.max(1);
+        if self.cursor < self.offset || self.cursor >= self.offset + height {
+            self.offset = self.cursor.saturating_sub(height / 2);
+        }
     }
 
     /// The stack of entry indices that leads to `folder`, if it is in the tree.
@@ -562,13 +620,29 @@ mod tests {
             path: PathBuf::from("/root"),
             dir: Box::new(root),
         };
-        let opts = Options {
+        Browser::new(tree, opts(), &Source::Scanned, None)
+    }
+
+    fn opts() -> Options {
+        Options {
             one_fs: false,
             threads: 1,
             cache: false,
             mft: false,
+        }
+    }
+
+    /// A browser on a real folder with the three files of `in_disk_order`,
+    /// so `put_back` finds them on disk without the Trash.
+    fn browser_on_disk(folder: &Path) -> Browser {
+        for name in ["small", "large", "middle"] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+        let tree = Tree {
+            path: folder.to_path_buf(),
+            dir: Box::new(in_disk_order()),
         };
-        Browser::new(tree, opts, &Source::Scanned, None)
+        Browser::new(tree, opts(), &Source::Scanned, None)
     }
 
     fn name_at_cursor(browser: &Browser) -> &[u8] {
@@ -603,6 +677,49 @@ mod tests {
         fresh.push(b"large", Kind::File, 1 << 20, 1 << 20, 0);
         browser.replace_current(fresh);
         assert_eq!(name_at_cursor(&browser), b"large");
+    }
+
+    #[test]
+    fn undo_puts_the_entry_back_without_a_rescan_and_keeps_the_screen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut browser = browser_on_disk(tmp.path());
+        let before = browser.dir().totals();
+        let i = browser.dir().find(b"middle").unwrap();
+        let taken = browser.tree.dir_at_mut(&[]).take(i);
+        // The user scrolled away after the delete, which was at offset 1.
+        (browser.cursor, browser.offset) = (0, 0);
+        browser.put_back(tmp.path(), Vec::new(), 1, vec![taken]);
+        assert_eq!(name_at_cursor(&browser), b"middle");
+        assert_eq!(browser.cursor, i);
+        assert_eq!(browser.dir().totals(), before);
+        assert_eq!(browser.offset, 1, "the screen of the delete comes back");
+    }
+
+    #[test]
+    fn undo_puts_the_cursor_in_the_middle_when_the_old_screen_hides_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut browser = browser_on_disk(tmp.path());
+        browser.list_height = 2;
+        let i = browser.dir().find(b"small").unwrap();
+        let taken = browser.tree.dir_at_mut(&[]).take(i);
+        browser.put_back(tmp.path(), Vec::new(), 0, vec![taken]);
+        assert_eq!((browser.cursor, browser.offset), (2, 1));
+    }
+
+    #[test]
+    fn undo_skips_entries_that_are_not_on_disk_or_already_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut browser = browser_on_disk(tmp.path());
+        let mut spare = in_disk_order();
+        let large = spare.find(b"large").unwrap();
+        // The tree still lists "large", for example a new item with that name.
+        let listed = spare.take(large);
+        // Nothing named "elsewhere" is on disk.
+        let (_, entry) = spare.take(0);
+        let missing = (b"elsewhere".to_vec(), entry);
+        let before = browser.dir().entries.len();
+        browser.put_back(tmp.path(), Vec::new(), 0, vec![listed, missing]);
+        assert_eq!(browser.dir().entries.len(), before);
     }
 
     #[test]
