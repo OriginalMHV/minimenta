@@ -137,6 +137,16 @@ pub struct Progress {
     /// table, but the same user could run minimenta as administrator to read
     /// it (Windows).
     pub elevate: AtomicBool,
+    /// Set while the scan checks the cache (macOS). The counters stay at 0
+    /// while it reads the cache and FSEvents replays the history. Then they
+    /// count the folders that changed.
+    pub checking_cache: AtomicBool,
+    /// While FSEvents replays the history: the time since the scan began at
+    /// which the check gives up at the latest, in milliseconds. Otherwise 0.
+    pub check_limit_ms: AtomicU64,
+    /// Set when the check gave up and the scan lists every folder again
+    /// (macOS).
+    pub cache_unusable: AtomicBool,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device
