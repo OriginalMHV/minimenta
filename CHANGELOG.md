@@ -23,7 +23,7 @@ minimenta has no release yet. The Unreleased section lists what version 0.1.0 co
 - Prebuilt binaries for macOS (Apple silicon and Intel), Linux (x86-64 and ARM64) and Windows (x86-64). Both commands are in each archive.
 - Installation with Homebrew, `cargo install`, and installer scripts for macOS, Linux and Windows.
 - A hint to run as administrator on Windows. After a slow scan (5 s or more) of an NTFS volume, minimenta suggests an elevated run. This happens when UAC limits your administrator account and minimenta could not read the master file table. A standard user and an elevated process do not see the hint. `--summary` prints the hint on stderr.
-- An estimate of the time left on the progress screen. minimenta takes it from the item count of an earlier scan of the same folder and the speed of the scan so far. A rescan with `r` has that count on every platform. On macOS, the cache file stores the count, so a full scan after a failed cache check also shows an estimate. A first scan has no earlier count and shows no estimate. The estimate shows after 2 s of counting and 1% of the earlier count.
+- An estimate of the time left on the progress screen. minimenta takes it from the item count of an earlier scan of the same folder and the speed of the scan so far. A rescan with `r` has that count on every platform. On macOS, the cache file stores the count. A full scan after a failed cache check shows an estimate when the cache is from the same folder and options. A first scan has no earlier count and shows no estimate. The estimate shows after 2 s of counting and 1% of the earlier count.
 
 ### Changed
 

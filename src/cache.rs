@@ -79,7 +79,7 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
             progress.disk.store(0, Ordering::Relaxed);
             progress.errors.store(0, Ordering::Relaxed);
             progress.cache_unusable.store(true, Ordering::Relaxed);
-            progress.checking_cache.store(false, Ordering::Relaxed);
+            progress.checking_cache.store(false, Ordering::Release);
         }
     }
     let event_id = if use_cache { current_event_id() } else { None };

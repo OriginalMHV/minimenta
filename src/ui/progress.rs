@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -68,7 +68,9 @@ pub fn scan(
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
-        let checking = progress.checking_cache.load(Relaxed);
+        // Pairs with the release in `cache::scan`, so the counters read below
+        // are at least as new as the flag.
+        let checking = progress.checking_cache.load(Acquire);
         if checking {
             counting_since = Instant::now();
         }
