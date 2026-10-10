@@ -62,11 +62,13 @@ const RESAVE_SECS: u64 = 3600;
 /// Scans `path`, or loads the cached tree and lists again only the directories
 /// that changed since. Saves the result for the next run.
 pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan> {
+    #[cfg(target_os = "macos")]
+    let began = Instant::now();
     let root = path.canonicalize()?;
     let use_cache = opts.cache && cache_allowed();
     #[cfg(target_os = "macos")]
     if use_cache {
-        if let Some(result) = incremental(&root, opts, progress) {
+        if let Some(result) = incremental(&root, opts, progress, began) {
             return result;
         }
         // The check can list folders before it gives up, and the full scan
@@ -107,14 +109,24 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     })
 }
 
+/// `began` is when the scan began. The progress screen counts its time from
+/// there.
 #[cfg(target_os = "macos")]
-fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::Result<Scan>> {
+fn incremental(
+    root: &Path,
+    opts: &Options,
+    progress: &Progress,
+    began: Instant,
+) -> Option<io::Result<Scan>> {
     use crate::fsevents;
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::Duration;
 
-    let bytes = std::sync::Arc::new(fs::read(file_for(root)?).ok()?);
+    let file = file_for(root)?;
+    fs::metadata(&file).ok()?;
+    // A large cache file takes a moment to read, so the screen says so first.
     progress.checking_cache.store(true, Relaxed);
+    let bytes = std::sync::Arc::new(fs::read(&file).ok()?);
     let (header, start) = decode_header(&bytes)?;
     // Decoding a large tree takes about as long as the checks and the
     // FSEvents replay below, so both run at the same time if a thread starts.
@@ -155,9 +167,11 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
             .filter(|m| m.volume.is_some() && header.mounts.contains(m));
         streams.extend(kept.map(|m| m.path.clone()));
     }
+    // Each replay waits at most `budget`. A replay for a mount that takes too
+    // long does not end the check, so the next one can wait as long again.
     let limit = budget.saturating_mul(u32::try_from(streams.len()).unwrap_or(u32::MAX));
     progress.check_limit_ms.store(
-        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+        u64::try_from((began.elapsed() + limit).as_millis()).unwrap_or(u64::MAX),
         Relaxed,
     );
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
@@ -188,6 +202,7 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
             changes.extend(inside.into_iter().map(|p| (p, event.recursive)));
         }
     }
+    progress.check_limit_ms.store(0, Relaxed);
     changes.extend(mount_changes(&header.mounts, &mounts, opts.one_fs));
     let mut reported: Vec<&PathBuf> = changes.iter().map(|(p, _)| p).collect();
     reported.sort();
@@ -1287,6 +1302,13 @@ mod tests {
             let cached = scan(root, &opts(), &progress).unwrap();
             flush();
             assert!(matches!(cached.source, Source::Cached { .. }));
+            assert_eq!(
+                progress
+                    .check_limit_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "the time limit shows only during the replay"
+            );
             (
                 cached,
                 progress.items.load(std::sync::atomic::Ordering::Relaxed),
