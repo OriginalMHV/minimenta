@@ -102,7 +102,13 @@ The CI benchmark jobs run on GitHub runners without endpoint security. Use them 
 
 ## Releases
 
-Maintainers follow [RELEASING.md](RELEASING.md). [cargo-dist](https://axodotdev.github.io/cargo-dist/) generates `.github/workflows/release.yml`. Do not edit that file by hand. The release plan check fails when the file differs from the dist configuration. Dependabot skips the file, so update its actions through cargo-dist.
+Maintainers release with one command from a clean `main`:
+
+```sh
+scripts/release.sh 0.1.0
+```
+
+The script opens a release PR that dates the CHANGELOG (and bumps the version after 0.1.0), waits for CI, and merges it. It then pushes a signed tag, which makes cargo-dist build the GitHub release and update the Homebrew tap. Last, it publishes the crate to crates.io. It asks before each step that cannot be undone. Run it again with the same version to continue after a failure. [RELEASING.md](RELEASING.md) has the details and the setup. [cargo-dist](https://axodotdev.github.io/cargo-dist/) generates `.github/workflows/release.yml`. Do not edit that file by hand. The release plan check fails when the file differs from the dist configuration. Dependabot skips the file, so update its actions through cargo-dist.
 
 ## License
 

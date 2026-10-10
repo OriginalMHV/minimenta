@@ -7,8 +7,6 @@ ci = "github"
 installers = ["shell", "powershell", "homebrew"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 tap = "OriginalMHV/homebrew-tap"
-publish-jobs = ["homebrew", "./publish-crates"]
-# The crates.io job reads the repository and asks GitHub for an OIDC token.
-# It needs no package write access, which dist grants to publish jobs by default.
-github-custom-job-permissions = { "publish-crates" = { contents = "read", id-token = "write" } }
+# scripts/release.sh publishes the crate to crates.io, as in Ward.
+publish-jobs = ["homebrew"]
 pr-run-mode = "plan"
