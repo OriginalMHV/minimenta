@@ -1,8 +1,9 @@
 name: Package
 
 # Proves that the crate packages and builds on Linux with the default features,
-# the same way the release workflow does before it publishes to crates.io. A
-# failure at release time comes after the GitHub release is public.
+# the same way scripts/release.sh does in its package dry run before it
+# publishes to crates.io. A failure at release time comes after the GitHub
+# release is public.
 #
 # The docs job builds the documentation the way docs.rs does, without mimalloc.
 

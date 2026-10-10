@@ -34,9 +34,9 @@ The same workflow runs on every pull request, but only the `plan` job runs. It c
    2. Open the repository settings of minimenta. Go to "Secrets and variables", then "Actions". Add a repository secret named `HOMEBREW_TAP_TOKEN` with the token as its value.
 2. Give Cargo a crates.io token:
    1. Log in to [crates.io](https://crates.io) with GitHub. Verify your email address in the account settings.
-   2. Create an API token with the scopes `publish-new` and `publish-update`. Limit it to the crate pattern `minimenta`. The first release creates the crate, so it needs `publish-new`. A token that is limited to `ward-cli` cannot publish minimenta.
+   2. Create an API token with the scopes `publish-new`, `publish-update` and `yank`. Limit it to the crate pattern `minimenta`. The first release creates the crate, so it needs `publish-new`. `yank` lets you withdraw a bad version (see "When a step fails"), and `cargo yank --undo` reverses it. A token that is limited to `ward-cli` cannot publish minimenta.
    3. Run `cargo login` and paste the token. Cargo keeps it in `~/.cargo/credentials.toml`.
-3. Check that private vulnerability reporting is on. `SECURITY.md`, `CODE_OF_CONDUCT.md` and the issue forms send people to the private report form of GitHub. Open <https://github.com/OriginalMHV/minimenta/security/advisories/new> in a private window and check that the form opens.
+3. Check that private vulnerability reporting is on. `SECURITY.md`, `CODE_OF_CONDUCT.md` and the issue forms send people to the private report form of GitHub. Run `gh api repos/OriginalMHV/minimenta/private-vulnerability-reporting --jq .enabled`. It must print `true`. If it prints `false`, open the repository settings, go to "Advanced Security", and enable "Private vulnerability reporting".
 4. Recommended: create a tag ruleset for the pattern `v*`. Go to "Rules", then "Rulesets", then "New tag ruleset". Restrict creations, updates and deletions. Add the role "Repository admin" to the bypass list. Then only you can start a release.
 
 The script checks item 1 and stops when the secret is missing. It warns when it finds no token for item 2.
@@ -49,7 +49,7 @@ Before the first release, merge the pull request that adds the install instructi
 
 ## Release
 
-1. Check out `main`. Make sure that you have no uncommitted changes. Untracked files do not matter.
+1. Check out `main`. Make sure that you have no uncommitted changes and no commits that are not on GitHub. Untracked files do not matter, unless they are in the package: `src`, `Cargo.lock`, `CHANGELOG.md`, `README.md` and the license files. `cargo publish` refuses such a file, also an ignored one such as `src/.DS_Store`. The script stops before the tag when it finds one.
 2. Choose the version. While the version is below 1.0.0, a breaking change raises the minor number and other changes raise the patch number. The first release is 0.1.0, the version that `Cargo.toml` already has.
 3. Run the script:
 
@@ -67,7 +67,7 @@ The script does these steps. It asks before each step that cannot be undone. Add
    - For a later release, the script also sets `version` in `Cargo.toml` and updates `Cargo.lock`.
 3. It runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo deny check` (when cargo-deny is installed) and `cargo publish --dry-run --locked`. The first run on a machine compiles everything and takes several minutes.
 4. It commits, pushes, and opens the pull request `chore: release vX.Y.Z`. It waits for CI, asks, and squash-merges the pull request.
-5. It asks, then creates the signed tag `vX.Y.Z` on the head of `main` and pushes it.
+5. It checks that the package has no untracked or ignored files. Then it asks, creates the signed tag `vX.Y.Z` on the head of `main`, and pushes it.
 6. It waits for the release workflow (about 10 minutes) and checks the GitHub release and the Homebrew formula.
 7. It asks, then runs `cargo publish --locked`.
 
@@ -81,7 +81,7 @@ Use these steps when you cannot use the script.
 2. Update `CHANGELOG.md` and, for a later release, the version in `Cargo.toml` and `Cargo.lock` (`cargo update --workspace`), as the script does in its step 2.
 3. Run the checks of step 3 of the script.
 4. Open a pull request with the title `chore: release vX.Y.Z`. Wait for CI. Squash-merge it.
-5. Create the signed tag on the merge commit, and push it:
+5. Create the signed tag on the head of `main`, and push it:
 
    ```sh
    git switch main
@@ -141,8 +141,9 @@ Use these steps when you cannot use the script.
 
 ## When a step fails
 
-- **CI fails on the release pull request.** Push a fix to the branch `release/vX.Y.Z`, or fix `main` and close the pull request. Then run the script again.
-- **A build job fails.** No release exists yet, because `host` runs after all builds. Fix the problem on `main`. Delete the tag with `git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`. Run the script again. It creates the tag on the new head of `main`.
+- **CI fails on the release pull request.** Push a fix to the branch `release/vX.Y.Z`. Or fix `main`, close the pull request, and delete the branch on GitHub and on your machine (`git push origin --delete release/vX.Y.Z` and `git branch -D release/vX.Y.Z`). Then run the script again. It prepares the release again with the date of that day.
+- **A `plan` or build job fails.** No release exists yet, because `host` runs after all builds. Fix the problem on `main`. Delete the tag with `git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`. Run the script again. It creates the tag on the new head of `main` and watches only the new run of the workflow.
+- **The `host` job fails.** Open the release page of `vX.Y.Z`. If a release exists with missing files, delete it with `gh release delete vX.Y.Z`. Then delete the tag as in the previous item, and run the script again. A rerun of the failed job does not work, because the release already exists.
 - **The Homebrew job fails.** The usual cause is a missing or expired `HOMEBREW_TAP_TOKEN`. The job runs after `host`, so the GitHub release is already public with all files. `brew install` does not work until the tap has the formula. Fix the secret. Then run `gh run rerun RUN_ID --failed`. This runs the failed job only and completes the tap update. Then run the script again for the crates.io step.
 - **`cargo publish` fails.** The GitHub release and the Homebrew formula already exist. For a token problem, create a new token (see "Set up once") and run `cargo login`. Then run the script again. It continues with `cargo publish`. If the package itself is wrong, fix it on `main` and release the next patch version.
 - **A published version has a defect.** A published version cannot be replaced. Run `cargo yank --version X.Y.Z` if the version is harmful, and release a new patch version.

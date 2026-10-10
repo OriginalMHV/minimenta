@@ -46,10 +46,11 @@ confirm() {
 
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "usage: scripts/release.sh <version> [--yes]  (for example 0.1.0)"
 [[ -z "$assume_yes" || "$assume_yes" == "--yes" ]] || fail "unknown option: $assume_yes"
+[[ $# -le 2 ]] || fail "too many arguments: $*"
 tag="v$version"
 branch="release/$tag"
 
-for tool in git gh cargo jq curl perl; do
+for tool in git gh cargo curl perl; do
   command -v "$tool" >/dev/null || fail "$tool is not installed"
 done
 gh auth status >/dev/null 2>&1 || fail "gh is not logged in. Run: gh auth login"
@@ -59,6 +60,13 @@ cd "$(git rev-parse --show-toplevel)"
 manifest_version() { awk -F'"' '/^version = "/ { print $2; exit }'; }
 crate_published() {
   curl -fsS -A "$CRATE-release-script ($REPO_URL)" "https://crates.io/api/v1/crates/$CRATE/$version" >/dev/null 2>&1
+}
+# Brings main up to origin/main. Local commits that are not on GitHub must not
+# go into a release without a PR.
+sync_main() {
+  git merge --quiet --ff-only origin/main || fail "main has diverged from origin/main"
+  [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] \
+    || fail "main has commits that are not on GitHub. Move them to a branch, reset main to origin/main, and run the script again."
 }
 # Undoes a release branch that was not pushed, so that a new run starts clean.
 abandon_branch() {
@@ -104,7 +112,7 @@ if grep -qF "## [$version] - " <<<"$main_changelog"; then
 else
   if ! git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
     [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || fail "check out main first"
-    git merge --quiet --ff-only origin/main || fail "main has diverged from origin/main"
+    sync_main
     if git rev-parse --quiet --verify "refs/heads/$branch" >/dev/null; then
       fail "the local branch $branch exists. Delete it with: git branch -D $branch"
     fi
@@ -167,6 +175,9 @@ else
 
   pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[0].number // empty')"
   if [[ -z "$pr" ]]; then
+    git fetch --quiet origin "$branch" || fail "could not fetch $branch"
+    git merge-base --is-ancestor origin/main FETCH_HEAD \
+      || fail "$branch on GitHub has no open PR and does not contain the latest main. Delete it with: git push origin --delete $branch. Then run the script again."
     body="$(mktemp)"
     # The backticks are Markdown.
     # shellcheck disable=SC2016
@@ -183,6 +194,11 @@ else
     sleep 10
   done
   gh pr checks "$pr" --repo "$REPO" --watch --interval 20 || fail "CI failed on PR #$pr. Fix it, then run the script again."
+  # The watch also ends without an error when a check was cancelled.
+  not_passed="$(gh pr checks "$pr" --repo "$REPO" --json bucket \
+    --jq '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | length')" \
+    || fail "could not read the checks of PR #$pr"
+  [[ "$not_passed" == 0 ]] || fail "$not_passed checks on PR #$pr did not pass. Run them again, then run the script again."
   confirm "Merge PR #$pr into main?"
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch \
     --subject "chore: release $tag (#$pr)" --body ""
@@ -190,12 +206,20 @@ else
 fi
 
 git switch --quiet main
-git merge --quiet --ff-only origin/main || fail "main has diverged from origin/main"
+sync_main
 [[ "$(manifest_version <Cargo.toml)" == "$version" ]] || fail "Cargo.toml on main does not have version $version"
 release_commit="$(git log -1 --format=%H -S "## [$version] - " HEAD -- CHANGELOG.md)"
 head_commit="$(git rev-parse HEAD)"
+# cargo publish refuses untracked and ignored files inside the package (for
+# example src/.DS_Store). Find them now, before the release is public.
+if ! crate_published; then
+  step "package files" cargo package --list --locked
+fi
 
 # Step 2: signed tag. cargo-dist builds the GitHub release and the formula.
+# A tag that is pushed again after a failed build starts a second run under the
+# same tag name. Only runs newer than this id count.
+before=0
 if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
   echo "Tag $tag already exists on GitHub."
   git fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" \
@@ -204,7 +228,7 @@ else
   # Like Ward, the tag goes on the head of main. After a failed build, that
   # head holds the fix.
   if [[ -n "$release_commit" && "$release_commit" != "$head_commit" ]]; then
-    echo "  main has $(git rev-list --count "$release_commit..HEAD") commits after the release PR. The tag includes them."
+    echo "  Commits on main after the release PR: $(git rev-list --count "$release_commit..HEAD"). The tag includes them."
   fi
   confirm "Create and push the signed tag $tag on $(git log -1 --format='%h (%s)' HEAD)? This starts the public release."
   if git rev-parse --quiet --verify "refs/tags/$tag" >/dev/null; then
@@ -213,6 +237,8 @@ else
   else
     git tag -s "$tag" -m "$tag"
   fi
+  before="$(gh run list --repo "$REPO" --workflow release.yml --branch "$tag" --event push --limit 1 \
+    --json databaseId --jq '.[0].databaseId // 0')" || before=0
   git push --quiet origin "refs/tags/$tag"
 fi
 tag_commit="$(git rev-parse "$tag^{commit}")"
@@ -220,8 +246,8 @@ tag_commit="$(git rev-parse "$tag^{commit}")"
 bold "Waiting for the release workflow (about 10 minutes)"
 run_id=""
 for _ in $(seq 1 30); do
-  run_id="$(gh run list --repo "$REPO" --workflow release.yml --branch "$tag" --event push --limit 1 \
-    --json databaseId --jq '.[0].databaseId // empty')"
+  run_id="$(gh run list --repo "$REPO" --workflow release.yml --branch "$tag" --event push --limit 10 \
+    --json databaseId --jq "map(select(.databaseId > ${before:-0})) | .[0].databaseId // empty" || true)"
   [[ -n "$run_id" ]] && break
   sleep 10
 done
@@ -231,7 +257,7 @@ gh run watch "$run_id" --repo "$REPO" --interval 30 --exit-status >/dev/null \
   || fail "the release workflow failed: $REPO_URL/actions/runs/$run_id. RELEASING.md, \"When a step fails\", says what to do. Then run the script again."
 
 bold "Checking the release"
-assets="$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets | length')"
+assets="$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets | length' || echo unknown)"
 if [[ "$assets" == 17 ]]; then
   echo "  The GitHub release has 17 files."
 else
