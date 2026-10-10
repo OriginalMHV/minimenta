@@ -147,6 +147,9 @@ pub struct Progress {
     /// Set when the check gave up and the scan lists every folder again
     /// (macOS).
     pub cache_unusable: AtomicBool,
+    /// The item count of an earlier scan of the same folder, or 0 when there
+    /// is none. The progress screen estimates the time left from it.
+    pub expected_items: AtomicU64,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device

@@ -23,6 +23,7 @@ minimenta has no release yet. The Unreleased section lists what version 0.1.0 co
 - Prebuilt binaries for macOS (Apple silicon and Intel), Linux (x86-64 and ARM64) and Windows (x86-64). Both commands are in each archive.
 - Installation with Homebrew, `cargo install`, and installer scripts for macOS, Linux and Windows.
 - A hint to run as administrator on Windows. After a slow scan (5 s or more) of an NTFS volume, minimenta suggests an elevated run. This happens when UAC limits your administrator account and minimenta could not read the master file table. A standard user and an elevated process do not see the hint. `--summary` prints the hint on stderr.
+- An estimate of the time left on the progress screen. minimenta takes it from the item count of an earlier scan of the same folder and the speed of the scan so far. A rescan with `r` has that count on every platform. On macOS, the cache has it when the cache check gives up. A first scan has no earlier count and shows no estimate.
 
 ### Changed
 
@@ -33,6 +34,7 @@ minimenta has no release yet. The Unreleased section lists what version 0.1.0 co
 - macOS: a repeat scan decodes the cache while it reads the FSEvents history. This makes repeat scans of large trees faster.
 - Windows: when you run minimenta as administrator on a clearly cold NTFS disk, the master file table reader starts after 50 ms. Before, it started after 250 ms. Warm scans and small scans do not change.
 - Windows: minimenta loads the system libraries for the Recycle Bin only when it needs them. Start-up is faster, which helps small scans most.
+- macOS: the cache file stores the item count of the saved tree. The file format changed (version 5), so the first scan after the update scans all folders.
 
 ### Fixed
 

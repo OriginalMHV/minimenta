@@ -13,7 +13,7 @@ use crate::scan::{Options, Progress};
 use crate::tree::{Dir, Entry, Kind, flag};
 
 const MAGIC: &[u8; 8] = b"MMCACHE\0";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Deeper trees are rejected when loading, so a damaged file cannot overflow
 /// the stack. Paths on macOS are at most 1024 bytes, so real trees have at
 /// most about 512 levels.
@@ -91,7 +91,8 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     let start = Instant::now();
     let dir = crate::scan::scan(&root, opts, progress)?;
     let session = event_id.and_then(|event_id| {
-        let header = new_header(&root, opts, event_id, start.elapsed().as_secs_f64(), mounts)?;
+        let secs = start.elapsed().as_secs_f64();
+        let header = new_header(&root, opts, event_id, secs, mounts, dir.totals().items)?;
         save_in_background(&header, &dir);
         Some(header)
     });
@@ -128,6 +129,7 @@ fn incremental(
     progress.checking_cache.store(true, Relaxed);
     let bytes = std::sync::Arc::new(fs::read(&file).ok()?);
     let (header, start) = decode_header(&bytes)?;
+    progress.expected_items.store(header.items, Relaxed);
     // Decoding a large tree takes about as long as the checks and the
     // FSEvents replay below, so both run at the same time if a thread starts.
     let shared = std::sync::Arc::clone(&bytes);
@@ -170,10 +172,8 @@ fn incremental(
     // Each replay waits at most `budget`. A replay for a mount that takes too
     // long does not end the check, so the next one can wait as long again.
     let limit = budget.saturating_mul(u32::try_from(streams.len()).unwrap_or(u32::MAX));
-    progress.check_limit_ms.store(
-        u64::try_from((began.elapsed() + limit).as_millis()).unwrap_or(u64::MAX),
-        Relaxed,
-    );
+    let deadline = u64::try_from((began.elapsed() + limit).as_millis()).unwrap_or(u64::MAX);
+    progress.check_limit_ms.store(deadline, Relaxed);
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
     for stream in &streams {
         let Some(events) =
@@ -224,6 +224,7 @@ fn incremental(
         event_id,
         saved_at: now(),
         mounts,
+        items: dir.totals().items,
         ..header
     };
     // An unchanged tree stays valid with the older position in the file:
@@ -445,6 +446,7 @@ fn new_header(
     event_id: u64,
     scan_secs: f64,
     mounts: Vec<Mount>,
+    items: u64,
 ) -> Option<Header> {
     let (root_dev, root_ino) = identity(root)?;
     Some(Header {
@@ -458,6 +460,7 @@ fn new_header(
         scan_secs,
         saved_at: now(),
         full_scan_at: now(),
+        items,
     })
 }
 
@@ -556,6 +559,9 @@ pub struct Header {
     /// When the whole tree was last scanned. Incremental updates keep it, so
     /// the age limit also applies to roots that are scanned every day.
     pub full_scan_at: u64,
+    /// Items in the saved tree. [`encode`] writes the count of the tree that
+    /// it saves, so the progress screen can estimate the time of a full scan.
+    pub items: u64,
 }
 
 fn path_hash(root: &Path) -> u64 {
@@ -602,6 +608,7 @@ pub fn encode(header: &Header, dir: &Dir) -> Vec<u8> {
     out.extend_from_slice(&header.scan_secs.to_le_bytes());
     out.extend_from_slice(&header.saved_at.to_le_bytes());
     out.extend_from_slice(&header.full_scan_at.to_le_bytes());
+    out.extend_from_slice(&dir.totals().items.to_le_bytes());
     encode_dir(&mut out, dir);
     out
 }
@@ -668,6 +675,7 @@ fn decode_header(bytes: &[u8]) -> Option<(Header, usize)> {
         scan_secs: f64::from_le_bytes(r.take(8)?.try_into().ok()?),
         saved_at: r.u64()?,
         full_scan_at: r.u64()?,
+        items: r.u64()?,
     };
     Some((header, r.pos))
 }
@@ -902,6 +910,7 @@ mod tests {
             scan_secs: 1.5,
             saved_at: 1_700_000_000,
             full_scan_at: 1_699_000_000,
+            items: root.totals().items,
         };
         (header, root)
     }
@@ -1214,14 +1223,15 @@ mod tests {
         }
 
         /// The progress screen says when the cache could not be used, and the
-        /// full scan counts from 0 again.
+        /// full scan counts from 0 again. The item count of the cached scan
+        /// stays for the estimate of the time left.
         #[test]
         fn a_cache_that_cannot_be_used_restarts_the_counters() {
             use std::sync::atomic::Ordering::Relaxed;
             let f = fixture();
             write(&f.root, "a/b.bin", 1000);
             let first = Progress::default();
-            scan(&f.root, &opts(), &first).unwrap();
+            let before = scan(&f.root, &opts(), &first).unwrap().dir.totals().items;
             flush();
             assert!(!first.checking_cache.load(Relaxed));
             assert!(
@@ -1243,6 +1253,7 @@ mod tests {
             assert!(progress.cache_unusable.load(Relaxed));
             assert_eq!(progress.items.load(Relaxed), run.dir.totals().items);
             assert_eq!(progress.errors.load(Relaxed), 0);
+            assert_eq!(progress.expected_items.load(Relaxed), before);
         }
 
         /// FSEvents reports `/Users/...` paths for a root given as
