@@ -171,10 +171,11 @@ fn lines(
 }
 
 /// Estimates the time left from the rate since the counting began. Returns
-/// `None` without an earlier count, in the first seconds of counting, and
-/// once the scan has passed the earlier count.
+/// `None` without an earlier count, before the scan has counted for
+/// `MIN_COUNTING` and 1% of the earlier count, and once the scan has passed
+/// the earlier count.
 fn time_left(items: u64, expected: u64, counting: Duration) -> Option<Duration> {
-    if items == 0 || items >= expected || counting < MIN_COUNTING {
+    if items >= expected || items < expected.div_ceil(100) || counting < MIN_COUNTING {
         return None;
     }
     Duration::try_from_secs_f64(counting.as_secs_f64() * (expected - items) as f64 / items as f64)
@@ -216,7 +217,13 @@ mod tests {
         assert_eq!(time_left(5000, 4000, ten), None, "passed the earlier count");
         assert_eq!(time_left(0, 4000, ten), None, "nothing counted yet");
         assert_eq!(
-            time_left(10, 4000, Duration::from_secs(1)),
+            time_left(39, 4000, ten),
+            None,
+            "below 1% of the earlier count"
+        );
+        assert!(time_left(40, 4000, ten).is_some());
+        assert_eq!(
+            time_left(1000, 4000, Duration::from_secs(1)),
             None,
             "too early"
         );

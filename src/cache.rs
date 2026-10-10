@@ -71,13 +71,15 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
         if let Some(result) = incremental(&root, opts, progress, began) {
             return result;
         }
-        // The check can list folders before it gives up, and the full scan
-        // counts them again.
-        if progress.checking_cache.swap(false, Ordering::Relaxed) {
+        // The check can list folders before it stops, and the full scan
+        // counts them again. The flag goes last, so the screen never shows
+        // the old counts as part of the full scan.
+        if progress.checking_cache.load(Ordering::Relaxed) {
             progress.items.store(0, Ordering::Relaxed);
             progress.disk.store(0, Ordering::Relaxed);
             progress.errors.store(0, Ordering::Relaxed);
             progress.cache_unusable.store(true, Ordering::Relaxed);
+            progress.checking_cache.store(false, Ordering::Relaxed);
         }
     }
     let event_id = if use_cache { current_event_id() } else { None };
@@ -129,7 +131,6 @@ fn incremental(
     progress.checking_cache.store(true, Relaxed);
     let bytes = std::sync::Arc::new(fs::read(&file).ok()?);
     let (header, start) = decode_header(&bytes)?;
-    progress.expected_items.store(header.items, Relaxed);
     // Decoding a large tree takes about as long as the checks and the
     // FSEvents replay below, so both run at the same time if a thread starts.
     let shared = std::sync::Arc::clone(&bytes);
@@ -137,23 +138,23 @@ fn incremental(
         .spawn(move || decode_tree(&shared[start..]))
         .ok();
     let (dev, ino) = identity(root)?;
+    let same_tree = header.root == root
+        && header.one_fs == opts.one_fs
+        && (header.root_dev, header.root_ino) == (dev, ino);
+    // The count of the same tree helps the estimate of a full scan, also when
+    // the cache is too old to use.
+    if same_tree {
+        progress.expected_items.store(header.items, Relaxed);
+    }
     // FSEvents reports nothing for a root that can no longer be read, so check
     // it directly. The full scan then reports the error.
-    let usable = fs::read_dir(root).is_ok()
-        && header.root == root
-        && header.one_fs == opts.one_fs
-        && (header.root_dev, header.root_ino) == (dev, ino)
+    let usable = same_tree
+        && fs::read_dir(root).is_ok()
         && volume_of(root)? == header.volume
         && now().saturating_sub(header.full_scan_at) <= MAX_AGE_SECS;
     if !usable {
         return None;
     }
-    let cancelled = || {
-        Some(Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "scan cancelled",
-        )))
-    };
     // Taken before the replay: anything that happens from now on is replayed
     // next time. Listing a directory twice is harmless.
     let event_id = fsevents::current_event_id()?;
@@ -181,7 +182,10 @@ fn incremental(
             fsevents::changes_since(stream, header.event_id, budget, &progress.cancel)
         else {
             if progress.cancel.load(Relaxed) {
-                return cancelled();
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "scan cancelled",
+                )));
             }
             if stream == root {
                 return None;
@@ -954,6 +958,16 @@ mod tests {
         assert_eq!(d2.sort, None, "the stored order must count as stale");
     }
 
+    /// The browser saves its session header with a tree that can have
+    /// changed since the scan.
+    #[test]
+    fn stores_the_item_count_of_the_saved_tree() {
+        let (mut header, dir) = sample();
+        header.items = 999;
+        let (h2, _) = decode(&encode(&header, &dir)).unwrap();
+        assert_eq!(h2.items, dir.totals().items);
+    }
+
     #[test]
     fn rejects_truncated_or_foreign_files() {
         let (header, dir) = sample();
@@ -1244,7 +1258,7 @@ mod tests {
             save_in_background(&header, &dir);
             flush();
             let progress = Progress::default();
-            // Stands for the folders that a check lists before it gives up.
+            // Stands for the folders that a check lists before it stops.
             progress.items.store(1000, Relaxed);
             progress.errors.store(1, Relaxed);
             let run = scan(&f.root, &opts(), &progress).unwrap();
@@ -1255,6 +1269,26 @@ mod tests {
             assert_eq!(progress.items.load(Relaxed), run.dir.totals().items);
             assert_eq!(progress.errors.load(Relaxed), 0);
             assert_eq!(progress.expected_items.load(Relaxed), before);
+        }
+
+        /// A count from a scan with other options would make the estimate wrong.
+        #[test]
+        fn a_cache_of_another_scan_scope_gives_no_count() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            write(&f.root, "a/b.bin", 1000);
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let progress = Progress::default();
+            let one_fs = Options {
+                one_fs: true,
+                ..opts()
+            };
+            let run = scan(&f.root, &one_fs, &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(progress.expected_items.load(Relaxed), 0);
         }
 
         /// FSEvents reports `/Users/...` paths for a root given as

@@ -142,9 +142,10 @@ pub struct Progress {
     /// they count the folders that the check lists again.
     pub checking_cache: AtomicBool,
     /// While FSEvents replays the history: the time since the scan began at
-    /// which the check gives up at the latest, in milliseconds. Otherwise 0.
+    /// which the check stops waiting at the latest, in milliseconds. Otherwise 0.
     pub check_limit_ms: AtomicU64,
-    /// Set when the check gave up and the scan lists every folder again
+    /// Set when the check could not use the cache and the scan lists every
+    /// folder again
     /// (macOS).
     pub cache_unusable: AtomicBool,
     /// The item count of an earlier scan of the same folder, or 0 when there
