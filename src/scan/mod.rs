@@ -138,8 +138,8 @@ pub struct Progress {
     /// it (Windows).
     pub elevate: AtomicBool,
     /// Set while the scan checks the cache (macOS). The counters stay at 0
-    /// while it reads the cache and FSEvents replays the history. Then they
-    /// count the folders that changed.
+    /// while it reads the cache and FSEvents replays the history. After that,
+    /// they count the folders that the check lists again.
     pub checking_cache: AtomicBool,
     /// While FSEvents replays the history: the time since the scan began at
     /// which the check gives up at the latest, in milliseconds. Otherwise 0.

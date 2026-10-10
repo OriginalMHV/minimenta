@@ -172,7 +172,8 @@ fn incremental(
     // Each replay waits at most `budget`. A replay for a mount that takes too
     // long does not end the check, so the next one can wait as long again.
     let limit = budget.saturating_mul(u32::try_from(streams.len()).unwrap_or(u32::MAX));
-    let deadline = u64::try_from((began.elapsed() + limit).as_millis()).unwrap_or(u64::MAX);
+    let deadline = began.elapsed().saturating_add(limit).as_millis();
+    let deadline = u64::try_from(deadline).unwrap_or(u64::MAX);
     progress.check_limit_ms.store(deadline, Relaxed);
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
     for stream in &streams {
@@ -1222,8 +1223,8 @@ mod tests {
             );
         }
 
-        /// The progress screen says when the cache could not be used, and the
-        /// full scan counts from 0 again. The item count of the cached scan
+        /// The scan marks that the cache could not be used, and the full scan
+        /// counts from 0 again. The item count of the cached scan
         /// stays for the estimate of the time left.
         #[test]
         fn a_cache_that_cannot_be_used_restarts_the_counters() {
