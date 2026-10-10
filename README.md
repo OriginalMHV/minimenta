@@ -29,10 +29,23 @@ minimenta is an interactive disk usage analyzer for the terminal, written in Rus
 ## Install
 
 ```sh
-cargo install --git https://github.com/OriginalMHV/minimenta
+# Homebrew (macOS and Linux)
+brew install OriginalMHV/tap/minimenta
+
+# crates.io
+cargo install --locked minimenta
+
+# Shell installer (macOS and Linux)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.sh | sh
+
+# PowerShell (Windows)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/OriginalMHV/minimenta/releases/latest/download/minimenta-installer.ps1 | iex"
 ```
 
-This installs two commands: `minimenta` and its short name `mm`. minimenta runs on macOS, Linux and Windows. Building it needs a recent stable Rust toolchain and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`.
+Each way installs two commands: `minimenta` and its short name `mm`. minimenta runs on macOS, Linux and Windows. The [releases](https://github.com/OriginalMHV/minimenta/releases) also have archives for macOS (Apple silicon and Intel), Linux (x86-64 and ARM64) and Windows (x86-64).
+
+`cargo install` builds minimenta from source. This needs Rust 1.88 or newer and a C compiler (for the mimalloc allocator). To build without mimalloc, add `--no-default-features`. To build the latest code on `main`, use `cargo install --locked --git https://github.com/OriginalMHV/minimenta`.
 
 ## Usage
 
