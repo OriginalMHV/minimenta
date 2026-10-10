@@ -286,7 +286,8 @@ Read every ratio as one sample on the machine types that GitHub gave these runs.
 
 </details>
 
-### Why minimenta is faster
+<details>
+<summary>Why minimenta is faster</summary>
 
 - **More threads.** A scan mostly waits on the disk and the kernel, so minimenta uses at least 16 threads. ncdu uses 1 thread unless you pass `-t`.
 - **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there. On a cold Linux disk, reading the directory blocks takes almost all the time, and the order of those reads decides the speed. In the Speed runs on Linux, `ncdu -t 64` and minimenta are even.
@@ -294,6 +295,8 @@ Read every ratio as one sample on the machine types that GitHub gave these runs.
 - **Huge folders on Linux.** One folder with hundreds of thousands of files used to keep one thread busy while the other threads waited. minimenta now splits the stat calls for the later batches of such a folder across threads. On a folder with 200,000 files, minimenta became 2.31x faster when warm and 2.60x faster when cold (run 37854877327, 20 warm pairs and 6 cold pairs). A scan of `/usr` does not change.
 - **The master file table on Windows.** As administrator on NTFS, minimenta reads the master file table of the volume in large parallel blocks, as WizTree does, while it lists directories. On a cold disk, this replaces thousands of small reads. The reader starts after 50 ms when the listing is clearly slow (below 40,000 items per second), or later when it is only moderately slow. The first result to finish wins, so a warm scan does not wait for the table. A slow scan (5 s or more) by an administrator whose rights UAC limits ends with a hint to run minimenta as administrator.
 - **The cache on macOS.** minimenta keeps the last scan of each folder in `~/Library/Caches/minimenta` and asks FSEvents which directories changed since. It lists only those again. The browser says when it shows a cached scan, and `r` scans everything again. The progress screen says when minimenta checks the cache. The check stops when FSEvents does not answer within half the time of the last full scan, or when too many folders changed. minimenta then scans all folders again, and the screen says so. During that scan, the progress screen estimates the time left. It uses the item count of the cached scan and the speed of the scan so far. A rescan with `r` shows the same estimate on every platform. A first scan has no earlier count, so it shows no estimate.
+
+</details>
 
 ## minimenta compared with other tools
 
