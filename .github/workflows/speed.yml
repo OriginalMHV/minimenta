@@ -1,8 +1,9 @@
 name: Speed
 
 # Compares minimenta with ncdu, gdu, dua-cli and dust on Linux, macOS and
-# Windows. Each job takes 30 to 40 minutes, so this workflow runs only when
-# bench/ or this file changes, and on request. The normal CI stays fast.
+# Windows. The macOS and Windows jobs take about 20 minutes and the Linux jobs
+# about 30 minutes (run 38058898121), so this workflow runs only when bench/
+# or this file changes, and on request. The normal CI stays fast.
 # Each job prints one JSON document between markers and uploads it. The last
 # job merges the documents. Linux runs in six jobs on different runners, and
 # the merge pools their pairs.
