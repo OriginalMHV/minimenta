@@ -46,6 +46,7 @@ Options:
   -t, --threads N        Number of scan threads (default: CPU count, at least 16)
       --no-cache         Always scan everything, and do not read or write the cache
       --no-mft           Do not read the NTFS master file table (Windows)
+      --no-spread        Read a cold disk in tree order, not in random order (Linux)
       --cache            Use the cache with --summary too (it scans fully by default)
       --summary          Scan, print the totals, and exit
   -h, --help             Print this help
@@ -74,6 +75,7 @@ fn parse_args() -> Result<Args, String> {
             threads: default_threads(),
             cache: true,
             mft: true,
+            spread: true,
         },
         summary: false,
     };
@@ -85,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
             Some("--summary") => args.summary = true,
             Some("--no-cache") => args.opts.cache = false,
             Some("--no-mft") => args.opts.mft = false,
+            Some("--no-spread") => args.opts.spread = false,
             Some("--cache") => cache_in_summary = true,
             Some("-t" | "--threads") => {
                 let n = it.next().and_then(|v| v.to_str()?.parse::<usize>().ok());

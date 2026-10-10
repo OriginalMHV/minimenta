@@ -312,6 +312,7 @@ mod tests {
             threads: 4,
             cache: false,
             mft: false,
+            spread: true,
         }
     }
 

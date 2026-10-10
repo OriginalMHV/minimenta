@@ -20,6 +20,8 @@ use macos as platform;
 mod linux;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 use linux as platform;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod spread;
 
 #[cfg(all(
     unix,
@@ -108,6 +110,10 @@ fn firmlink_root<'a>(path: &'a Path, tree_root: Option<&'a Path>) -> &'a Path {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field is an independent command line switch"
+)]
 pub struct Options {
     pub one_fs: bool,
     pub threads: usize,
@@ -115,6 +121,8 @@ pub struct Options {
     pub cache: bool,
     /// Read the NTFS master file table when possible (Windows, administrator).
     pub mft: bool,
+    /// Spread the reads of a cold scan over the disk (Linux, 64-bit).
+    pub spread: bool,
 }
 
 #[derive(Default)]
@@ -348,7 +356,7 @@ fn list(
         .build()
         .map_err(io::Error::other)?;
     let root = native(path)?;
-    let (mut dir, result) = pool.install(|| scan_dir(&ctx, &root, 0, dev_ino(meta).1));
+    let (mut dir, result) = pool.install(|| scan_root(&ctx, &root, dev_ino(meta).1, opts.spread));
     // The macOS scanner does not count directory blocks, so the root does not either.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -367,6 +375,23 @@ fn list(
             Ok(dir)
         }
     }
+}
+
+/// Scans the tree below `root`. Linux on 64-bit targets spreads the reads of
+/// a cold scan over the disk unless `spread` is false. The other targets
+/// follow the tree.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn scan_root(ctx: &Ctx, root: &NativePath, id: u64, spread: bool) -> (Dir, io::Result<()>) {
+    if spread {
+        spread::scan_tree(ctx, root, id)
+    } else {
+        scan_dir(ctx, root, 0, id)
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn scan_root(ctx: &Ctx, root: &NativePath, id: u64, _spread: bool) -> (Dir, io::Result<()>) {
+    scan_dir(ctx, root, 0, id)
 }
 
 /// A subdirectory found by `read_dir`, to be scanned next.
@@ -722,6 +747,7 @@ mod tests {
             threads: 4,
             cache: false,
             mft: false,
+            spread: true,
         }
     }
 
@@ -747,19 +773,23 @@ mod tests {
         write(&tmp.path().join("a/one.bin"), 1000);
         write(&tmp.path().join("a/b/c/deep.bin"), 10_000);
 
-        let progress = Progress::default();
-        let dir = scan(tmp.path(), &opts(), &progress).unwrap();
-        let totals = dir.totals();
+        // `--no-spread` changes the Linux scheduler only, not the result.
+        for spread in [true, false] {
+            let progress = Progress::default();
+            let opts = Options { spread, ..opts() };
+            let dir = scan(tmp.path(), &opts, &progress).unwrap();
+            let totals = dir.totals();
 
-        assert_eq!(totals.apparent, 11_100);
-        assert_eq!(totals.items, 6);
-        assert!(totals.disk >= 11_100);
-        let a = find(&dir, "a");
-        assert_eq!(a.kind, Kind::Dir);
-        assert_eq!(a.apparent, 11_000);
-        assert_eq!(a.items, 5);
-        assert_eq!(dir.name(&dir.entries[0]), b"a", "largest entry comes first");
-        assert_eq!(progress.items.load(Relaxed), 6);
+            assert_eq!(totals.apparent, 11_100, "spread {spread}");
+            assert_eq!(totals.items, 6, "spread {spread}");
+            assert!(totals.disk >= 11_100, "spread {spread}");
+            let a = find(&dir, "a");
+            assert_eq!(a.kind, Kind::Dir);
+            assert_eq!(a.apparent, 11_000);
+            assert_eq!(a.items, 5);
+            assert_eq!(dir.name(&dir.entries[0]), b"a", "largest entry comes first");
+            assert_eq!(progress.items.load(Relaxed), 6, "spread {spread}");
+        }
     }
 
     #[cfg(unix)]

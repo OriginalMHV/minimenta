@@ -77,6 +77,7 @@ Press Esc during a scan to cancel it, or `q` to quit.
 | `-t N`, `--threads N` | Use N scan threads (default: the number of CPU cores, at least 16) |
 | `--no-cache` | Scan everything, and do not read or write the cache (macOS) |
 | `--no-mft` | Do not read the NTFS master file table (Windows) |
+| `--no-spread` | Read a cold disk in tree order, not in random order (Linux) |
 | `--cache` | Use the cache together with `--summary`, which scans everything by default |
 | `--summary` | Scan, print the totals, and exit |
 | `-h`, `--help` | Print the help |
@@ -289,6 +290,7 @@ Read every ratio as one sample on the machine types that GitHub gave these runs.
 
 - **More threads.** A scan mostly waits on the disk and the kernel, so minimenta uses at least 16 threads. ncdu uses 1 thread unless you pass `-t`.
 - **Bulk reads on macOS.** One `getattrlistbulk(2)` call returns the names, types and sizes of many entries at once. ncdu calls `fstatat` for every file. Linux has no such call, so both tools need one `stat` per file there. On a cold Linux disk, reading the directory blocks takes almost all the time, and the order of those reads decides the speed. In the Linux runs, `ncdu -t 64` is as fast as minimenta.
+- **Random order on a cold Linux disk.** Threads that follow the tree read neighbouring folders at the same time, and the disk then serves fewer requests per second. When a scan waits for the disk, minimenta reads the folders in random order. A scan that keeps the CPUs busy, such as a scan of a cached tree, follows the tree. On GitHub runners with a virtual disk, a cold scan of `/usr` took 0.92x (SCSI disk) and 0.89x (NVMe disk) of the time of the scan in tree order. We did not measure spinning disks, network drives or local NVMe disks. If a cold scan is slower on such a disk, `--no-spread` reads the folders in tree order.
 - **Huge folders on Linux.** One folder with hundreds of thousands of files used to keep one thread busy while the other threads waited. minimenta now splits the stat calls for the later batches of such a folder across threads. On a folder with 200,000 files, minimenta became 2.31x faster when warm and 2.60x faster when cold (run 37854877327, 20 warm pairs and 6 cold pairs). A scan of `/usr` does not change.
 - **The master file table on Windows.** As administrator on NTFS, minimenta reads the master file table of the volume in large parallel blocks, as WizTree does, while it lists directories. On a cold disk, this replaces thousands of small reads. The reader starts after 50 ms when the listing is clearly slow (below 40,000 items per second), or later when it is only moderately slow. The first result to finish wins, so a warm scan does not wait for the table. A slow scan (5 s or more) by an administrator whose rights UAC limits ends with a hint to run minimenta as administrator.
 - **The cache on macOS.** minimenta keeps the last scan of each folder in `~/Library/Caches/minimenta` and asks FSEvents which directories changed since. It lists only those again. The browser says when it shows a cached scan, and `r` scans everything again.

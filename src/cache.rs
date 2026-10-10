@@ -827,6 +827,7 @@ mod tests {
             threads: 2,
             cache: false,
             mft: false,
+            spread: true,
         };
         let progress = Progress::default();
         progress.elevate.store(true, Ordering::Relaxed);
@@ -1080,6 +1081,7 @@ mod tests {
                 threads: 4,
                 cache: true,
                 mft: false,
+                spread: true,
             }
         }
 
