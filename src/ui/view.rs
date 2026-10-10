@@ -357,7 +357,7 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         " y or Enter: yes   any other key: no"
     };
     lines.push(Line::from(keys).dark_gray());
-    lines.push(Line::from(" a: yes, and do not ask again until you quit").dark_gray());
+    lines.push(Line::from(" Shift+A: yes, and do not ask again until you quit").dark_gray());
     let inner = popup(frame, 60, lines.len() as u16 + 2, title, border);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

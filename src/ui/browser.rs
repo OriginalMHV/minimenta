@@ -44,7 +44,7 @@ pub struct Browser {
     /// Every move to the Trash in this session, the latest last, so `u` can
     /// put them back one after the other.
     undo: Vec<UndoStep>,
-    /// Whether `d` and `D` ask first. `a` in the question turns one off
+    /// Whether `d` and `D` ask first. `A` in the question turns one off
     /// until quit, and the help screen turns it back on.
     pub ask_trash: bool,
     pub ask_delete: bool,
@@ -180,7 +180,9 @@ impl Browser {
                     // Enter also opens folders, so a habit press must not
                     // delete for good. A move to the Trash can be undone.
                     KeyCode::Enter if !permanent => Action::Delete { permanent, targets },
-                    KeyCode::Char('a' | 'A') => {
+                    // Shift is needed for the same reason: `a` switches the
+                    // size in the list.
+                    KeyCode::Char('A') => {
                         *self.ask_mut(permanent) = false;
                         Action::Delete { permanent, targets }
                     }
@@ -773,14 +775,21 @@ mod tests {
     }
 
     #[test]
-    fn a_stops_one_question_until_the_help_screen_turns_it_back_on() {
+    fn shift_a_stops_one_question_until_the_help_screen_turns_it_back_on() {
         for (permanent, same, other, again) in [(false, 'd', 'D', 't'), (true, 'D', 'd', 'p')] {
             let mut browser = browser_with(in_disk_order());
             browser.mode = Mode::Confirm {
                 permanent,
                 targets: vec![0],
             };
-            assert!(matches!(browser.handle(key('a')), Action::Delete { .. }));
+            // A habit press of `a` answers no.
+            assert!(matches!(browser.handle(key('a')), Action::None));
+            assert!(browser.ask_trash && browser.ask_delete);
+            browser.mode = Mode::Confirm {
+                permanent,
+                targets: vec![0],
+            };
+            assert!(matches!(browser.handle(key('A')), Action::Delete { .. }));
             // The same key now deletes at once, and the other key still asks.
             let action = browser.handle(key(same));
             assert!(matches!(action, Action::Delete { permanent: p, .. } if p == permanent));
@@ -835,7 +844,7 @@ mod tests {
         };
         let shown = screen(&mut browser);
         assert!(shown.contains("and 2 more"));
-        assert!(shown.contains("a: yes, and do not ask again"));
+        assert!(shown.contains("Shift+A: yes, and do not ask again"));
     }
 
     #[test]
