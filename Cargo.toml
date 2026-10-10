@@ -18,6 +18,7 @@ categories = ["command-line-utilities", "filesystem"]
 # Images, benchmarks and CI files stay out of the package. crates.io rewrites
 # the relative image paths in the README to the repository on GitHub.
 include = [
+    "/build.rs",
     "/src",
     "/Cargo.lock",
     "/CHANGELOG.md",
