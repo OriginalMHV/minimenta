@@ -1,59 +1,59 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="760" height="784" viewBox="0 0 760 784" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" role="img" aria-labelledby="title desc">
-<title id="title">First scan of a cold disk</title><desc id="desc">Speed relative to ncdu with its default settings. Longer is faster. macOS: minimenta 5.5x, dua-cli 3.1x, ncdu -t 64 2.7x, gdu 2.0x, dust 1.9x, ncdu 1.0x. Linux: minimenta 4.8x, ncdu -t 64 4.5x, gdu 3.9x, dust 3.3x, dua-cli 3.1x, ncdu 1.0x. Windows: Relative to gdu. ncdu does not run on Windows. minimenta (admin) 4.5x, minimenta (no admin) 1.5x, dua-cli 1.1x, gdu 1.0x, dust 0.6x.</desc>
+<title id="title">First scan of a cold disk</title><desc id="desc">Speed relative to ncdu with its default settings. Longer is faster. macOS: minimenta 5.1x, dua-cli 3.3x, ncdu -t 64 2.9x, gdu 1.8x, dust 1.7x, ncdu 1.0x. Linux: minimenta 4.9x, ncdu -t 64 4.8x, gdu 3.7x, dust 3.3x, dua-cli 3.0x, ncdu 1.0x. Windows: Relative to gdu. ncdu does not run on Windows. minimenta (admin) 4.4x, minimenta (no admin) 1.3x, dua-cli 1.0x, gdu 1.0x, dust 0.6x.</desc>
 <style>.fg{fill:#1F2328}.mu{fill:#59636E}.ac{fill:#1A7F5A}.bar{fill:#8C959F}@media (prefers-color-scheme: dark){.fg{fill:#F0F6FC}.mu{fill:#9198A1}.ac{fill:#44B78F}.bar{fill:#6E7681}}</style>
 <text x="40" y="34" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" class="fg">First scan of a cold disk</text>
 <text x="40" y="60" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" class="mu">Speed relative to ncdu with its default settings. Longer is faster.</text>
 <text x="40" y="100" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" class="mu"><tspan font-size="16" font-weight="600">macOS</tspan></text>
 <text x="40" y="130" font-size="20" class="fg">minimenta</text>
-<text x="368" y="130" font-size="20" text-anchor="end" class="fg">5.5x</text>
+<text x="368" y="130" font-size="20" text-anchor="end" class="fg">5.1x</text>
 <text x="392" y="130" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">########################</tspan>]</text>
 <text x="40" y="158" font-size="20" class="mu">dua-cli</text>
-<text x="368" y="158" font-size="20" text-anchor="end" class="mu">3.1x</text>
-<text x="392" y="158" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">##############</tspan>          ]</text>
+<text x="368" y="158" font-size="20" text-anchor="end" class="mu">3.3x</text>
+<text x="392" y="158" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">################</tspan>        ]</text>
 <text x="40" y="186" font-size="20" class="mu">ncdu -t 64</text>
-<text x="368" y="186" font-size="20" text-anchor="end" class="mu">2.7x</text>
-<text x="392" y="186" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">############</tspan>            ]</text>
+<text x="368" y="186" font-size="20" text-anchor="end" class="mu">2.9x</text>
+<text x="392" y="186" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">##############</tspan>          ]</text>
 <text x="40" y="214" font-size="20" class="mu">gdu</text>
-<text x="368" y="214" font-size="20" text-anchor="end" class="mu">2.0x</text>
-<text x="392" y="214" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#########</tspan>               ]</text>
+<text x="368" y="214" font-size="20" text-anchor="end" class="mu">1.8x</text>
+<text x="392" y="214" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">########</tspan>                ]</text>
 <text x="40" y="242" font-size="20" class="mu">dust*</text>
-<text x="368" y="242" font-size="20" text-anchor="end" class="mu">1.9x</text>
+<text x="368" y="242" font-size="20" text-anchor="end" class="mu">1.7x</text>
 <text x="392" y="242" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">########</tspan>                ]</text>
 <text x="40" y="270" font-size="20" class="mu">ncdu</text>
 <text x="368" y="270" font-size="20" text-anchor="end" class="mu">1.0x</text>
-<text x="392" y="270" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                    ]</text>
+<text x="392" y="270" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#####</tspan>                   ]</text>
 <text x="40" y="308" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" class="mu"><tspan font-size="16" font-weight="600">Linux</tspan></text>
 <text x="40" y="338" font-size="20" class="fg">minimenta</text>
-<text x="368" y="338" font-size="20" text-anchor="end" class="fg">4.8x</text>
-<text x="392" y="338" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">#####################</tspan>   ]</text>
+<text x="368" y="338" font-size="20" text-anchor="end" class="fg">4.9x</text>
+<text x="392" y="338" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">#######################</tspan> ]</text>
 <text x="40" y="366" font-size="20" class="mu">ncdu -t 64</text>
-<text x="368" y="366" font-size="20" text-anchor="end" class="mu">4.5x</text>
-<text x="392" y="366" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">####################</tspan>    ]</text>
+<text x="368" y="366" font-size="20" text-anchor="end" class="mu">4.8x</text>
+<text x="392" y="366" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#######################</tspan> ]</text>
 <text x="40" y="394" font-size="20" class="mu">gdu</text>
-<text x="368" y="394" font-size="20" text-anchor="end" class="mu">3.9x</text>
+<text x="368" y="394" font-size="20" text-anchor="end" class="mu">3.7x</text>
 <text x="392" y="394" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#################</tspan>       ]</text>
 <text x="40" y="422" font-size="20" class="mu">dust*</text>
 <text x="368" y="422" font-size="20" text-anchor="end" class="mu">3.3x</text>
-<text x="392" y="422" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">##############</tspan>          ]</text>
+<text x="392" y="422" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">################</tspan>        ]</text>
 <text x="40" y="450" font-size="20" class="mu">dua-cli</text>
-<text x="368" y="450" font-size="20" text-anchor="end" class="mu">3.1x</text>
+<text x="368" y="450" font-size="20" text-anchor="end" class="mu">3.0x</text>
 <text x="392" y="450" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">##############</tspan>          ]</text>
 <text x="40" y="478" font-size="20" class="mu">ncdu</text>
 <text x="368" y="478" font-size="20" text-anchor="end" class="mu">1.0x</text>
-<text x="392" y="478" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                    ]</text>
+<text x="392" y="478" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#####</tspan>                   ]</text>
 <text x="40" y="516" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" class="mu"><tspan font-size="16" font-weight="600">Windows</tspan><tspan dx="12" font-size="15">Relative to gdu. ncdu does not run on Windows.</tspan></text>
 <text x="40" y="546" font-size="20" class="fg">minimenta (admin)</text>
-<text x="368" y="546" font-size="20" text-anchor="end" class="fg">4.5x</text>
-<text x="392" y="546" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">####################</tspan>    ]</text>
+<text x="368" y="546" font-size="20" text-anchor="end" class="fg">4.4x</text>
+<text x="392" y="546" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">#####################</tspan>   ]</text>
 <text x="40" y="574" font-size="20" class="mu">minimenta (no admin)</text>
-<text x="368" y="574" font-size="20" text-anchor="end" class="mu">1.5x</text>
-<text x="392" y="574" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">#######</tspan>                 ]</text>
+<text x="368" y="574" font-size="20" text-anchor="end" class="mu">1.3x</text>
+<text x="392" y="574" font-size="20" xml:space="preserve" class="mu">[<tspan class="ac">######</tspan>                  ]</text>
 <text x="40" y="602" font-size="20" class="mu">dua-cli</text>
-<text x="368" y="602" font-size="20" text-anchor="end" class="mu">1.1x</text>
+<text x="368" y="602" font-size="20" text-anchor="end" class="mu">1.0x</text>
 <text x="392" y="602" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#####</tspan>                   ]</text>
 <text x="40" y="630" font-size="20" class="mu">gdu</text>
 <text x="368" y="630" font-size="20" text-anchor="end" class="mu">1.0x</text>
-<text x="392" y="630" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">####</tspan>                    ]</text>
+<text x="392" y="630" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">#####</tspan>                   ]</text>
 <text x="40" y="658" font-size="20" class="mu">dust*</text>
 <text x="368" y="658" font-size="20" text-anchor="end" class="mu">0.6x</text>
 <text x="392" y="658" font-size="20" xml:space="preserve" class="mu">[<tspan class="bar">###</tspan>                     ]</text>
