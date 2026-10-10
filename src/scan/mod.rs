@@ -138,15 +138,18 @@ pub struct Progress {
     /// it (Windows).
     pub elevate: AtomicBool,
     /// Set while the scan checks the cache (macOS). The counters stay at 0
-    /// while it reads the cache and FSEvents replays the history. Then they
-    /// count the folders that changed.
+    /// while it reads the cache and FSEvents replays the history. After that,
+    /// they count the folders that the check lists again.
     pub checking_cache: AtomicBool,
     /// While FSEvents replays the history: the time since the scan began at
-    /// which the check gives up at the latest, in milliseconds. Otherwise 0.
+    /// which the check stops waiting at the latest, in milliseconds. Otherwise 0.
     pub check_limit_ms: AtomicU64,
-    /// Set when the check gave up and the scan lists every folder again
-    /// (macOS).
+    /// Set when the check could not use the cache and the scan lists every
+    /// folder again (macOS).
     pub cache_unusable: AtomicBool,
+    /// The item count of an earlier scan of the same folder, or 0 when there
+    /// is none. The progress screen estimates the time left from it.
+    pub expected_items: AtomicU64,
 }
 
 // The Windows scanner never follows reparse points, so it needs no device

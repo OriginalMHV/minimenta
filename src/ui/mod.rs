@@ -35,7 +35,7 @@ fn run_screens(
                 None => return Ok(()),
             },
         };
-        match progress::scan(terminal, &path, opts)? {
+        match progress::scan(terminal, &path, opts, 0)? {
             Outcome::Done(scan) => {
                 let path = path.canonicalize().unwrap_or(path);
                 // Rescans inside this tree must count its firmlinks once.

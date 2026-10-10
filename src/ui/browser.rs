@@ -503,7 +503,7 @@ impl Browser {
             cache: false,
             ..self.opts
         };
-        match progress::scan(terminal, &path, opts)? {
+        match progress::scan(terminal, &path, opts, self.dir().totals().items)? {
             Outcome::Done(fresh) => {
                 self.replace_current(fresh.dir);
                 self.changed = true;
