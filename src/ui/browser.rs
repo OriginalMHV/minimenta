@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -44,6 +45,10 @@ pub struct Browser {
     /// Every move to the Trash in this session, the latest last, so `u` can
     /// put them back one after the other.
     undo: Vec<UndoStep>,
+    /// Whether `d` and `D` ask first. `A` in the question turns one off
+    /// until quit, and the help screen turns it back on.
+    pub ask_trash: bool,
+    pub ask_delete: bool,
 }
 
 /// One move to the Trash. The removed entries keep their sizes and subtrees,
@@ -102,6 +107,8 @@ impl Browser {
             session,
             changed: false,
             undo: Vec::new(),
+            ask_trash: true,
+            ask_delete: true,
         };
         browser.apply_sort();
         browser
@@ -121,6 +128,11 @@ impl Browser {
                 Action::Quit => return Ok(()),
                 Action::Delete { permanent, targets } => {
                     self.delete(terminal, permanent, &targets)?;
+                    // Keys typed during a slow delete must not start another
+                    // delete without a question. Only a quit key counts.
+                    if !(self.ask_trash && self.ask_delete) && drain_keys()? {
+                        return Ok(());
+                    }
                 }
                 Action::Rescan => self.rescan(terminal)?,
                 Action::Undo => self.undo(),
@@ -156,7 +168,11 @@ impl Browser {
         self.message = None;
         match self.mode {
             Mode::Help => {
-                self.mode = Mode::Browse;
+                match key.code {
+                    KeyCode::Char('t') if !self.ask_trash => self.ask_trash = true,
+                    KeyCode::Char('p') if !self.ask_delete => self.ask_delete = true,
+                    _ => self.mode = Mode::Browse,
+                }
                 return Action::None;
             }
             Mode::Confirm { .. } => {
@@ -170,6 +186,12 @@ impl Browser {
                     // Enter also opens folders, so a habit press must not
                     // delete for good. A move to the Trash can be undone.
                     KeyCode::Enter if !permanent => Action::Delete { permanent, targets },
+                    // Shift is needed for the same reason: `a` switches the
+                    // size in the list.
+                    KeyCode::Char('A') => {
+                        *self.ask_mut(permanent) = false;
+                        Action::Delete { permanent, targets }
+                    }
                     _ => Action::None,
                 };
             }
@@ -202,8 +224,8 @@ impl Browser {
                 self.sort.apparent = !self.sort.apparent;
                 self.apply_sort();
             }
-            KeyCode::Char('d') => self.confirm(false),
-            KeyCode::Char('D') => self.confirm(true),
+            KeyCode::Char('d') => return self.confirm(false),
+            KeyCode::Char('D') => return self.confirm(true),
             KeyCode::Char('r') => return Action::Rescan,
             KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -318,13 +340,26 @@ impl Browser {
         }
     }
 
-    fn confirm(&mut self, permanent: bool) {
+    fn confirm(&mut self, permanent: bool) -> Action {
         let mut targets: Vec<usize> = self.selected().collect();
         if targets.is_empty() && self.cursor < self.dir().entries.len() {
             targets.push(self.cursor);
         }
-        if !targets.is_empty() {
+        if targets.is_empty() {
+            Action::None
+        } else if *self.ask_mut(permanent) {
             self.mode = Mode::Confirm { permanent, targets };
+            Action::None
+        } else {
+            Action::Delete { permanent, targets }
+        }
+    }
+
+    fn ask_mut(&mut self, permanent: bool) -> &mut bool {
+        if permanent {
+            &mut self.ask_delete
+        } else {
+            &mut self.ask_trash
         }
     }
 
@@ -389,16 +424,10 @@ impl Browser {
             });
         }
 
-        let done = if permanent {
-            "Deleted"
-        } else {
-            "Moved to the Trash:"
-        };
-        let hint = if undoable { " Press u to undo." } else { "" };
-        self.message = Some(match result {
-            Ok(()) => format!("{done} {}.{hint}", count(gone)),
-            Err(e) => format!("{done} {gone} of {}.{hint} Error: {e}", count(total)),
-        });
+        let asks = *self.ask_mut(permanent);
+        self.message = Some(delete_message(
+            permanent, gone, total, undoable, asks, &result,
+        ));
         Ok(())
     }
 
@@ -573,6 +602,52 @@ fn set_selected(e: &mut crate::tree::Entry, on: bool) {
     }
 }
 
+/// The status line after a delete. The hint about the help screen comes
+/// last and only without an error, so an error text keeps its place.
+fn delete_message(
+    permanent: bool,
+    gone: usize,
+    total: usize,
+    undoable: bool,
+    asks: bool,
+    result: &Result<(), String>,
+) -> String {
+    let done = if permanent {
+        "Deleted"
+    } else {
+        "Moved to the Trash:"
+    };
+    let undo = if undoable { " Press u to undo." } else { "" };
+    match result {
+        Ok(()) => {
+            let again = if asks {
+                ""
+            } else {
+                " Press ? to ask first again."
+            };
+            format!("{done} {}.{undo}{again}", count(gone))
+        }
+        Err(e) => format!("{done} {gone} of {}.{undo} Error: {e}", count(total)),
+    }
+}
+
+/// Drops the keys that wait. True when one of them quits.
+fn drain_keys() -> io::Result<bool> {
+    let mut quit = false;
+    while event::poll(Duration::ZERO)? {
+        if let Event::Key(key) = event::read()? {
+            quit |= quits(key);
+        }
+    }
+    Ok(quit)
+}
+
+fn quits(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && (key.code == KeyCode::Char('q')
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
+}
+
 fn count(n: usize) -> String {
     if n == 1 {
         "1 item".into()
@@ -736,6 +811,181 @@ mod tests {
             assert_eq!(matches!(action, Action::Delete { .. }), deletes);
             assert!(matches!(browser.mode, Mode::Browse));
         }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// True when the action deletes item 0 the given way.
+    fn deletes_first(action: &Action, permanent: bool) -> bool {
+        matches!(action, Action::Delete { permanent: p, targets } if *p == permanent && *targets == [0])
+    }
+
+    #[test]
+    fn shift_a_stops_one_question_until_the_help_screen_turns_it_back_on() {
+        for (permanent, same, other, again) in [(false, 'd', 'D', 't'), (true, 'D', 'd', 'p')] {
+            let mut browser = browser_with(in_disk_order());
+            browser.mode = Mode::Confirm {
+                permanent,
+                targets: vec![0],
+            };
+            // A habit press of `a` answers no.
+            assert!(matches!(browser.handle(key('a')), Action::None));
+            assert!(browser.ask_trash && browser.ask_delete);
+            browser.mode = Mode::Confirm {
+                permanent,
+                targets: vec![0],
+            };
+            assert!(deletes_first(&browser.handle(key('A')), permanent));
+            // Only the question that was answered stops.
+            assert_eq!(
+                (browser.ask_trash, browser.ask_delete),
+                (permanent, !permanent)
+            );
+            // The same key now deletes at once, and the other key still asks.
+            assert!(deletes_first(&browser.handle(key(same)), permanent));
+            assert!(matches!(browser.mode, Mode::Browse));
+            assert!(matches!(browser.handle(key(other)), Action::None));
+            assert!(matches!(browser.mode, Mode::Confirm { .. }));
+            browser.handle(key('n'));
+            // The help screen stays open when it turns the question back on.
+            browser.handle(key('?'));
+            browser.handle(key(again));
+            assert!(matches!(browser.mode, Mode::Help));
+            assert!(browser.ask_trash && browser.ask_delete);
+            browser.handle(key(again));
+            assert!(matches!(browser.mode, Mode::Browse));
+            browser.handle(key(same));
+            assert!(matches!(browser.mode, Mode::Confirm { .. }));
+        }
+    }
+
+    #[test]
+    fn the_help_screen_turns_on_only_the_question_it_names() {
+        let mut browser = browser_with(in_disk_order());
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        browser.mode = Mode::Help;
+        browser.handle(key('p'));
+        assert!(!browser.ask_trash && browser.ask_delete);
+        browser.handle(key('t'));
+        assert!(browser.ask_trash && browser.ask_delete);
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        browser.handle(key('t'));
+        assert!(browser.ask_trash && !browser.ask_delete);
+        assert!(matches!(browser.mode, Mode::Help));
+    }
+
+    #[test]
+    fn d_in_an_empty_folder_does_nothing_even_when_the_question_is_off() {
+        let mut browser = browser_with(Dir::default());
+        browser.stack = vec![0];
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        assert!(matches!(browser.handle(key('d')), Action::None));
+        assert!(matches!(browser.handle(key('D')), Action::None));
+        assert!(matches!(browser.mode, Mode::Browse));
+    }
+
+    /// The text of an 80x24 terminal, the smallest common size.
+    fn screen(browser: &mut Browser) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| view::draw(frame, browser)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The row below the first row that contains `text`.
+    fn row_below<'a>(shown: &'a str, text: &str) -> &'a str {
+        let mut rows = shown.lines().skip_while(|row| !row.contains(text));
+        rows.next();
+        rows.next().unwrap_or("")
+    }
+
+    #[test]
+    fn the_help_screen_shows_a_question_that_is_off_under_its_key() {
+        let mut browser = browser_with(in_disk_order());
+        browser.mode = Mode::Help;
+        let shown = screen(&mut browser);
+        assert!(shown.contains("Press any key to close"));
+        assert!(!shown.contains("No question"));
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        let shown = screen(&mut browser);
+        let trash = row_below(&shown, "Move to the Trash (selection or cursor)");
+        let delete = row_below(&shown, "Delete permanently");
+        assert!(trash.contains("No question until quit. Press t to ask again."));
+        assert!(delete.contains("No question until quit. Press p to ask again."));
+        assert!(shown.contains("Press any other key to close"));
+        browser.ask_trash = true;
+        let shown = screen(&mut browser);
+        assert!(!shown.contains("Press t to ask again"));
+        assert!(shown.contains("Press p to ask again"));
+    }
+
+    #[test]
+    fn the_question_shows_its_keys_and_whole_long_names() {
+        let mut folder = Dir::default();
+        for i in 0..8 {
+            folder.push(&[b'f', b'0' + i], Kind::File, 4096, 4096, 0);
+        }
+        let spaced = format!("{} {} {}", "w".repeat(35), "v".repeat(35), "u".repeat(35));
+        folder.push(spaced.as_bytes(), Kind::File, 4096, 4096, 0);
+        folder.push(&[b'x'; 70], Kind::File, 4096, 4096, 0);
+        let mut browser = browser_with(folder);
+        browser.stack = vec![0];
+        for (permanent, targets) in [(true, (0..8).collect()), (false, vec![8, 9])] {
+            browser.mode = Mode::Confirm { permanent, targets };
+            let shown = screen(&mut browser);
+            assert!(shown.contains("Shift+A: yes, and stop asking until you quit"));
+            assert!(shown.contains("Any other key: no"));
+            if permanent {
+                assert!(shown.contains("and 2 more"));
+            } else {
+                // The popup is 58 columns wide inside, and the names start
+                // after 3 spaces.
+                let rows = [
+                    format!("│   {}│", "x".repeat(55)),
+                    format!("│{}{}│", "x".repeat(15), " ".repeat(43)),
+                    format!("│   {} {}│", "w".repeat(35), "v".repeat(19)),
+                    format!("│{} {}{}│", "v".repeat(16), "u".repeat(35), " ".repeat(6)),
+                ];
+                for row in rows {
+                    assert!(shown.contains(&row), "missing popup row {row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_status_line_names_the_help_only_after_a_delete_without_errors() {
+        assert_eq!(
+            delete_message(true, 2, 2, false, false, &Ok(())),
+            "Deleted 2 items. Press ? to ask first again."
+        );
+        assert_eq!(
+            delete_message(false, 1, 1, true, true, &Ok(())),
+            "Moved to the Trash: 1 item. Press u to undo."
+        );
+        assert_eq!(
+            delete_message(true, 1, 2, false, false, &Err("busy".into())),
+            "Deleted 1 of 2 items. Error: busy"
+        );
+    }
+
+    #[test]
+    fn only_q_and_ctrl_c_quit_from_the_dropped_keys() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(quits(key('q')) && quits(ctrl_c));
+        assert!(!quits(key('D')) && !quits(key('c')) && !quits(key('A')));
     }
 
     #[test]

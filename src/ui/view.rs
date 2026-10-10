@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::browser::{Browser, Mode};
 use super::display_path;
@@ -58,7 +58,7 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
 
     match &b.mode {
         Mode::Browse => {}
-        Mode::Help => draw_help(frame),
+        Mode::Help => draw_help(frame, b),
         Mode::Confirm { permanent, targets } => draw_confirm(frame, b, *permanent, targets),
     }
 }
@@ -276,22 +276,42 @@ const HELP: &[(&str, &str)] = &[
     ("q", "Quit"),
 ];
 
-fn draw_help(frame: &mut Frame) {
-    let inner = popup(frame, 72, HELP.len() as u16 + 6, "Help", Color::Reset);
-    let mut lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::from(format!(" {keys:<20}")).bold(),
-                Span::from(*what),
-            ])
-        })
-        .collect();
+fn draw_help(frame: &mut Frame, b: &Browser) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (keys, what) in HELP {
+        lines.push(Line::from(vec![
+            Span::from(format!(" {keys:<20}")).bold(),
+            Span::from(*what),
+        ]));
+        // A question that is off shows under its key. With both off, the
+        // help still fits a terminal of 24 rows.
+        let again = match *keys {
+            "d" if !b.ask_trash => Some('t'),
+            "D" if !b.ask_delete => Some('p'),
+            _ => None,
+        };
+        if let Some(again) = again {
+            lines.push(
+                Line::from(format!(
+                    " {:20}No question until quit. Press {again} to ask again.",
+                    ""
+                ))
+                .bold(),
+            );
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(" Flags: ! read error  . error below  > other file system").dark_gray());
     lines.push(Line::from("        H hard link  @ symlink or special  e empty").dark_gray());
     lines.push(Line::from(""));
-    lines.push(Line::from(" Press any key to close").dark_gray());
+    // t and p keep the help open while their question is off.
+    let close = if b.ask_trash && b.ask_delete {
+        " Press any key to close"
+    } else {
+        " Press any other key to close"
+    };
+    lines.push(Line::from(close).dark_gray());
+    let inner = popup(frame, 72, lines.len() as u16 + 2, "Help", Color::Reset);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -320,31 +340,82 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         )
     };
     let shown = targets.len().min(6);
-    let inner = popup(frame, 60, shown as u16 + 7, title, border);
-    let mut lines = vec![
-        Line::from(format!(" {question}")).bold(),
-        Line::from(format!(" {} in total", format_size(size).trim_start())),
+    let plain = Style::new();
+    let mut text = vec![
+        (
+            format!(" {question}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        (
+            format!(" {} in total", format_size(size).trim_start()),
+            plain,
+        ),
+        (String::new(), plain),
     ];
-    lines.push(Line::from(""));
     for &i in &targets[..shown] {
         let e = &dir.entries[i];
         let slash = if e.kind == Kind::Dir { "/" } else { "" };
-        lines.push(Line::from(format!(
-            "   {slash}{}",
-            String::from_utf8_lossy(dir.name(e))
-        )));
+        let name = String::from_utf8_lossy(dir.name(e));
+        text.push((format!("   {slash}{name}"), plain));
     }
     if targets.len() > shown {
-        lines.push(Line::from(format!("   … and {} more", targets.len() - shown)).dark_gray());
+        let more = format!("   … and {} more", targets.len() - shown);
+        text.push((more, Style::new().fg(Color::DarkGray)));
     }
-    lines.push(Line::from(""));
-    let keys = if permanent {
-        " y yes   any other key: no"
+    text.push((String::new(), plain));
+    // The text is split into rows here, so the popup gets the exact height
+    // for long names. The keys have their own area at the bottom.
+    let width = usize::from(
+        60.min(frame.area().width.saturating_sub(2))
+            .saturating_sub(2),
+    )
+    .max(1);
+    let body: Vec<Line> = text
+        .iter()
+        .flat_map(|(line, style)| {
+            split_rows(line, width)
+                .into_iter()
+                .map(|row| Line::styled(row, *style))
+        })
+        .collect();
+    let yes = if permanent {
+        " y: yes"
     } else {
-        " y or Enter: yes   any other key: no"
+        " y or Enter: yes"
     };
-    lines.push(Line::from(keys).dark_gray());
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let keys = vec![
+        Line::from(yes).dark_gray(),
+        Line::from(" Shift+A: yes, and stop asking until you quit").dark_gray(),
+        Line::from(" Any other key: no").dark_gray(),
+    ];
+    let inner = popup(
+        frame,
+        60,
+        (body.len() + keys.len() + 2) as u16,
+        title,
+        border,
+    );
+    let [top, bottom] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(keys.len() as u16)]).areas(inner);
+    frame.render_widget(Paragraph::new(body), top);
+    frame.render_widget(Paragraph::new(keys), bottom);
+}
+
+/// Splits text into rows of at most `width` columns. It splits at any
+/// character, which suits file names.
+fn split_rows(text: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for c in text.chars() {
+        let w = Span::raw(c.encode_utf8(&mut [0; 4]).to_string()).width();
+        if used + w > width && used > 0 {
+            rows.push(String::new());
+            used = 0;
+        }
+        rows.last_mut().expect("rows is never empty").push(c);
+        used += w;
+    }
+    rows
 }
 
 #[cfg(test)]
