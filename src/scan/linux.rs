@@ -254,6 +254,7 @@ mod tests {
             threads,
             cache: false,
             mft: false,
+            spread: true,
         }
     }
 

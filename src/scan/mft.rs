@@ -381,6 +381,7 @@ mod tests {
             threads: 4,
             cache: false,
             mft: false,
+            spread: true,
         };
         let listed = crate::scan::scan(&root, &opts, &Progress::default()).unwrap();
 
