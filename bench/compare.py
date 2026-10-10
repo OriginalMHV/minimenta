@@ -17,8 +17,11 @@ Before it times anything, the script also runs every tool once on each tree,
 and compares the totals. A tool that reports a far lower total than
 minimenta may skip work, so the script marks that total.
 
+With --job N/M, the document is job N of M jobs that run the same comparison
+on different runners. bench/merge_speed.py pools the pairs of these jobs.
+
 Usage: python -I bench/compare.py --out FILE --tools-dir DIR \\
-           [--cold ID=PATH]... [--warm ID=PATH]... [--minimenta EXE]
+           [--cold ID=PATH]... [--warm ID=PATH]... [--minimenta EXE] [--job N/M]
 """
 
 import argparse
@@ -555,7 +558,7 @@ def pull_request_head():
 def environment(args, cores):
     head, number = pull_request_head()
     env = os.environ
-    return {
+    doc = {
         "schema": SCHEMA,
         "platform": PLAT,
         "date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -580,6 +583,19 @@ def environment(args, cores):
             "elevated": elevated(),
         },
     }
+    if args.job:
+        doc["job_index"], doc["job_count"] = args.job
+    return doc
+
+
+def job_spec(text):
+    try:
+        index, count = (int(part) for part in text.split("/"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not N/M") from None
+    if not 1 <= index <= count:
+        raise argparse.ArgumentTypeError(f"{text!r} needs 1 <= N <= M")
+    return index, count
 
 
 def elevated():
@@ -594,7 +610,8 @@ def elevated():
 
 
 def markdown(doc):
-    lines = [f"### Speed on {doc['platform']}", ""]
+    job = f", job {doc['job_index']} of {doc['job_count']}" if doc.get("job_count") else ""
+    lines = [f"### Speed on {doc['platform']}{job}", ""]
     lines.append(f"Run {doc.get('run_id')}, commit `{(doc.get('commit') or '')[:12]}`, {doc['runner']['cores']} cores, {doc['date']}.")
     for tree in doc["trees"]:
         lines += ["", f"**{tree['mode']} {tree['id']}** `{tree['path']}`, {tree['items']} items", ""]
@@ -640,6 +657,7 @@ def main():
     parser.add_argument("--warm-budget", type=int, default=240, help="seconds per warm tree")
     parser.add_argument("--timeout", type=int, default=900, help="seconds for one run")
     parser.add_argument("--allow-missing", action="store_true", help="skip tools that are not installed (local tests)")
+    parser.add_argument("--job", type=job_spec, help="N/M: this is job N of M jobs with the same comparison")
     args = parser.parse_args()
 
     cores = os.cpu_count() or 1

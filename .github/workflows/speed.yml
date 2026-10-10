@@ -1,10 +1,11 @@
 name: Speed
 
 # Compares minimenta with ncdu, gdu, dua-cli and dust on Linux, macOS and
-# Windows. Each job takes about 30 minutes, so this workflow runs only when
+# Windows. Each job takes 30 to 40 minutes, so this workflow runs only when
 # bench/ or this file changes, and on request. The normal CI stays fast.
 # Each job prints one JSON document between markers and uploads it. The last
-# job merges the three documents.
+# job merges the documents. Linux runs in six jobs on different runners, and
+# the merge pools their pairs.
 on:
   pull_request:
     paths:
@@ -25,9 +26,20 @@ defaults:
     shell: bash
 
 jobs:
+  # On Linux, minimenta and `ncdu -t 64` are close. In the harness gap study
+  # (docs/experiments.md), the median ratio of one job went from 0.95 to 1.13
+  # with the runner. One job with 6 to 8 pairs cannot show a difference of a
+  # few percent. So six jobs run at least 12 pairs each, and
+  # bench/merge_speed.py judges the pairs of all jobs together.
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6]
+    env:
+      JOB: ${{ matrix.job }}/${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -48,11 +60,11 @@ jobs:
         run: |
           python3 -I bench/compare.py --out "$RUNNER_TEMP/speed-linux.json" --tools-dir "$RUNNER_TEMP/tools" \
             --cold usr=/usr --warm synthetic="$RUNNER_TEMP/bench-tree" \
-            --cold-budget 1080 --warm-budget 240
+            --cold-budget 1500 --warm-budget 240 --min-pairs 12 --job "$JOB"
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: speed-linux
+          name: speed-linux-${{ matrix.job }}
           path: ${{ runner.temp }}/speed-linux.json
           if-no-files-found: error
 
@@ -133,7 +145,7 @@ jobs:
         with:
           pattern: speed-*
           path: speeds
-      - name: Merge the three documents
+      - name: Merge the documents
         run: python3 -I bench/merge_speed.py speed-merged.json speeds/*/speed-*.json
       - uses: actions/upload-artifact@v7
         with:

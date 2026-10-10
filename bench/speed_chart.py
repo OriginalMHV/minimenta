@@ -23,6 +23,9 @@ How the chart values come from the data:
 4. In one run, the value of a tool is the ratio of the baseline divided by the
    ratio of the tool. The value of minimenta is the ratio of the baseline.
 5. With several runs, the value is the median of the values of the runs.
+   A run can time a platform in several jobs on different runners. Then
+   bench/merge_speed.py has pooled the pairs of these jobs, and the ratio of
+   the run is the median over the pairs of all its jobs.
 6. The chart shows one decimal. An exact tie rounds against minimenta: the value of
    minimenta rounds down and the value of every other tool rounds up.
 7. A bar has 24 characters at most. Its number of # characters is the shown value divided
@@ -199,6 +202,14 @@ def count_range(values, unit=""):
     return f"{text} {unit}".strip()
 
 
+def runners_of(info):
+    """Lists (job, runner) for each job of a platform document. job is None
+    when one job timed the platform."""
+    if info.get("jobs"):
+        return [(job["job"], job["runner"]) for job in info["jobs"]]
+    return [(None, info["runner"])]
+
+
 def tree_path(platform, path):
     return path.replace("/", "\\") if platform == "windows" else path
 
@@ -235,7 +246,7 @@ def build_chart(runs):
         note = None
         if not has_ncdu:
             note = f"Relative to {series[baseline].first['label']}. ncdu does not run on {name}."
-        runner_cores = sorted({run.platforms[platform]["runner"]["cores"] for run in runs if platform in run.platforms})
+        runner_cores = sorted({runner["cores"] for run in runs if platform in run.platforms for _, runner in runners_of(run.platforms[platform])})
         facts = {
             "name": name,
             "cores": count_range(runner_cores, "cores") if len(runner_cores) > 1 else f"{runner_cores[0]} cores",
@@ -362,9 +373,11 @@ def runs_table(runs):
         for platform, name in PLATFORMS:
             info = run.platforms.get(platform)
             if info:
-                runner = info["runner"]
-                where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
-                runner_rows.append([run.id, where, runner["cpu"].replace("|", "/"), str(runner["cores"])])
+                for job, runner in runners_of(info):
+                    where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
+                    if job is not None:
+                        where += f", job {job}"
+                    runner_rows.append([run.id, where, runner["cpu"].replace("|", "/"), str(runner["cores"])])
     lines = ["**Runs**", ""]
     lines += md_table(["Run", "Date", "Commit"], run_rows)
     if any(run.doc.get("pull_request_head") for run in runs):
@@ -389,6 +402,9 @@ def tree_table(runs, key, name, chart_keys):
     items = count_range([row["items"] for row in base_rows.rows], "items")
     lines = [tree_title(name, key, series), ""]
     intro = [items]
+    jobs = [row.get("jobs", 1) for row in base_rows.rows]
+    if max(jobs) > 1:
+        intro.append(f"Each run pools the pairs of {count_range(jobs)} jobs on different runners")
     speed = None
     if mode == "cold":
         baseline, speed = speed_values(runs, key)
