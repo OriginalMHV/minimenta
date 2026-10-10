@@ -60,7 +60,7 @@ sha256_check() {
 # fetch URL FILE SHA256: each file goes in its own folder, so nothing downloaded is ever run from there.
 fetch() {
   mkdir -p "$(dirname "$2")"
-  curl -sSfL -A "$ua" -o "$2" "$1"
+  curl -sSfL --retry 3 --retry-all-errors -A "$ua" -o "$2" "$1"
   sha256_check "$3" "$2"
 }
 

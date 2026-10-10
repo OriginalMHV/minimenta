@@ -35,6 +35,11 @@ How the chart values come from the data:
 In the tables, a tie rounds down for the ratio and for the bounds of the middle
 half, and in the direction that is worse for minimenta for times. With several
 runs, a table value is the median of the values of the runs, and the pairs add up.
+
+A tree with pooled jobs also gets a table of the job medians of all runs: the
+number of jobs, the jobs in which each tool was faster, the median of the job
+medians and an interval that holds the median of the job medians with a
+probability of at least 95 percent (median_interval in bench/compare.py).
 """
 
 import argparse
@@ -43,6 +48,10 @@ import os
 import sys
 from fractions import Fraction
 from xml.sax.saxutils import escape
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from compare import median_interval  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BEGIN = "<!-- speed-tables:begin -->"
@@ -152,6 +161,10 @@ def load(paths):
         seen.add(run.id)
         for platform in run.doc.get("missing_platforms") or []:
             print(f"speed_chart: run {run.id} has no data for {platform}", file=sys.stderr)
+        for platform, jobs in (run.doc.get("missing_jobs") or {}).items():
+            print(f"speed_chart: run {run.id} misses the {platform} jobs {jobs}", file=sys.stderr)
+        for platform, problems in (run.doc.get("incomplete_jobs") or {}).items():
+            print(f"speed_chart: run {run.id} has incomplete {platform} jobs: {', '.join(problems)}", file=sys.stderr)
     return runs
 
 
@@ -203,11 +216,10 @@ def count_range(values, unit=""):
 
 
 def runners_of(info):
-    """Lists (job, runner) for each job of a platform document. job is None
-    when one job timed the platform."""
+    """Lists the runner of each job of a platform document."""
     if info.get("jobs"):
-        return [(job["job"], job["runner"]) for job in info["jobs"]]
-    return [(None, info["runner"])]
+        return [job["runner"] for job in info["jobs"]]
+    return [info["runner"]]
 
 
 def tree_path(platform, path):
@@ -246,7 +258,7 @@ def build_chart(runs):
         note = None
         if not has_ncdu:
             note = f"Relative to {series[baseline].first['label']}. ncdu does not run on {name}."
-        runner_cores = sorted({runner["cores"] for run in runs if platform in run.platforms for _, runner in runners_of(run.platforms[platform])})
+        runner_cores = sorted({runner["cores"] for run in runs if platform in run.platforms for runner in runners_of(run.platforms[platform])})
         facts = {
             "name": name,
             "cores": count_range(runner_cores, "cores") if len(runner_cores) > 1 else f"{runner_cores[0]} cores",
@@ -373,11 +385,15 @@ def runs_table(runs):
         for platform, name in PLATFORMS:
             info = run.platforms.get(platform)
             if info:
-                for job, runner in runners_of(info):
-                    where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
-                    if job is not None:
-                        where += f", job {job}"
-                    runner_rows.append([run.id, where, runner["cpu"].replace("|", "/"), str(runner["cores"])])
+                kinds = {}
+                for runner in runners_of(info):
+                    kind = (runner["cpu"], runner["cores"], bool(runner.get("elevated")) and platform == "windows")
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                for (cpu, cores, admin), count in kinds.items():
+                    where = f"{name}, administrator" if admin else name
+                    if info.get("jobs"):
+                        where += f", {count} job{'s' if count != 1 else ''}"
+                    runner_rows.append([run.id, where, cpu.replace("|", "/"), str(cores)])
     lines = ["**Runs**", ""]
     lines += md_table(["Run", "Date", "Commit"], run_rows)
     if any(run.doc.get("pull_request_head") for run in runs):
@@ -402,7 +418,7 @@ def tree_table(runs, key, name, chart_keys):
     items = count_range([row["items"] for row in base_rows.rows], "items")
     lines = [tree_title(name, key, series), ""]
     intro = [items]
-    jobs = [row.get("jobs", 1) for row in base_rows.rows]
+    jobs = [row.get("jobs", 1) for each in series.values() if not each.first["diagnostic"] for row in each.rows]
     if max(jobs) > 1:
         intro.append(f"Each run pools the pairs of {count_range(jobs)} jobs on different runners")
     speed = None
@@ -447,6 +463,36 @@ def tree_table(runs, key, name, chart_keys):
     lines += md_table(header, rows, align)
     if speed:
         lines += ["", f"The speed value of minimenta is {fixed(speed['minimenta'], 1, DOWN)}x. It is the ratio of the baseline."]
+    if max(jobs) > 1:
+        lines += ["", *job_table(series)]
+    return lines
+
+
+def job_table(series):
+    """The job medians of all runs for each tool of a tree with pooled jobs."""
+    rows = []
+    for each in series.values():
+        if each.first["diagnostic"]:
+            continue
+        medians = [m for row in each.rows for m in row.get("job_medians", [])]
+        if not medians:
+            continue
+        interval = median_interval(medians)
+        rows.append(
+            [
+                each.first["label"],
+                str(len(medians)),
+                f"{sum(m > 1 for m in medians)}{NBSP}/{NBSP}{sum(m < 1 for m in medians)}",
+                fixed(median(medians), 3, DOWN),
+                f"{fixed(interval[0], 3, DOWN)}{NBSP}to{NBSP}{fixed(interval[1], 3, DOWN)}" if interval else "n/a",
+            ]
+        )
+    lines = [
+        "Each job ran on its own runner. Faster jobs shows the jobs in which minimenta was faster in the median and the jobs in which the tool was. "
+        "The interval holds the median of the job medians with a probability of at least 95 percent. Unlike the middle half, it gets narrower with more jobs.",
+        "",
+    ]
+    lines += md_table(["Tool", "Jobs", "Faster jobs", "Median of the job medians", "Interval (95 percent)"], rows, ["---", "---:", "---", "---:", "---"])
     return lines
 
 

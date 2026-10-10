@@ -10,8 +10,12 @@ run ID and the commit of its platform, so every number traces to a run.
 A platform can have several documents from bench/compare.py --job N/M, one per
 job. The script pools them into one platform document of the same form: the
 pairs of all jobs form one sample, and the ratio, middle half and verdict come
-from all pairs together. The documents of the jobs stay unchanged under
-"job_documents".
+from all pairs together. Each pooled row also lists the median ratio of each
+job and an interval for the median of the job medians, which holds it with a
+probability of at least 95 percent (see median_interval in bench/compare.py).
+The documents of the jobs stay unchanged under "job_documents". A job that is
+missing, or that misses a tree or a tool, fails the merge after the merged
+document is written.
 """
 
 import datetime
@@ -20,8 +24,9 @@ import os
 import statistics
 import sys
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import quartiles, verdict  # noqa: E402
+from compare import median_interval, quartiles, verdict  # noqa: E402
 
 NOTES = {
     "ratio": "Time of the tool divided by the time of minimenta, for each pair of runs that alternate in order. "
@@ -53,6 +58,7 @@ def rows(doc):
             }
             row.update({field: result[field] for field in ROW_FIELDS})
             row["jobs"] = result.get("jobs", 1)
+            row["job_medians"] = [entry["ratio_median"] for entry in result.get("job_ratios", [])]
             row["total_bytes"] = tree["totals"].get(result["tool"] if result["tool"] in tree["totals"] else result["name"], {}).get("bytes")
             yield row
 
@@ -67,12 +73,17 @@ def pool_result(index_results, warnings, where):
     ratios = [ratio for result in results for ratio in result["ratios"]]
     q1, q3 = quartiles(ratios)
     median = statistics.median(ratios)
+    versions = sorted({result["version"] for result in results if result["version"] is not None})
+    if len(versions) < len({result["version"] for result in results}):
+        warnings.append(f"{where} {first['tool']}: some jobs found no version")
+    job_medians = [result["ratio_median"] for result in results]
+    interval = median_interval(job_medians)
     return {
         "tool": first["tool"],
         "name": first["name"],
         "label": first["label"],
         "diagnostic": first["diagnostic"],
-        "version": " / ".join(sorted({result["version"] for result in results})),
+        "version": " / ".join(versions) if versions else None,
         "settings": first["settings"],
         "threads": first["threads"],
         "pairs": len(ratios),
@@ -91,6 +102,9 @@ def pool_result(index_results, warnings, where):
         "exit_codes": sorted({code for result in results for code in result["exit_codes"]}),
         "jobs": len(results),
         "job_ratios": [{"job": index, "pairs": result["pairs"], "ratio_median": result["ratio_median"]} for index, result in index_results],
+        "jobs_minimenta_faster": sum(m > 1.0 for m in job_medians),
+        "jobs_tool_faster": sum(m < 1.0 for m in job_medians),
+        "job_median_interval": list(interval) if interval else None,
     }
 
 
@@ -100,8 +114,9 @@ def pool_tree(parts, warnings):
     where = f"{first['mode']} {first['id']}"
     if any(tree["path"] != first["path"] for _, tree in parts):
         sys.exit(f"merge_speed: the jobs scanned different paths for {where}")
-    if any(tree["items"] != first["items"] for _, tree in parts):
-        warnings.append(f"{where}: the jobs counted different items, the rows show job {parts[0][0]}")
+    for field in ("items", "errors"):
+        if any(tree[field] != first[field] for _, tree in parts):
+            warnings.append(f"{where}: the jobs differ in {field}. The tree shows the value of job {parts[0][0]}.")
     by_tool = {}
     for index, tree in parts:
         for result in tree["results"]:
@@ -131,7 +146,7 @@ def pool(docs, warnings):
     indexes = [d.get("job_index") for d in docs]
     if not count or any(d.get("job_count") != count for d in docs) or len(set(indexes)) != len(indexes):
         sys.exit(f"merge_speed: two documents for {platform} that are not distinct jobs of one comparison")
-    pooled = {key: value for key, value in docs[0].items() if key not in ("job_index", "trees", "date", "finished")}
+    pooled = {key: value for key, value in docs[0].items() if key not in ("job_index", "trees", "date", "finished", "runner", "run_attempt")}
     pooled["date"] = min(d["date"] for d in docs)
     pooled["finished"] = max(d.get("finished") or d["date"] for d in docs)
     pooled["missing_jobs"] = [index for index in range(1, count + 1) if index not in indexes]
@@ -147,6 +162,17 @@ def pool(docs, warnings):
                 keys.append(key)
             parts.setdefault(key, []).append((d["job_index"], tree))
     pooled["trees"] = [pool_tree(parts[key], warnings) for key in keys]
+    incomplete = [f"job {d['job_index']} has no trees" for d in docs if not d["trees"]]
+    for key in keys:
+        present = [index for index, _ in parts[key]]
+        incomplete += [f"job {index} misses the {key[0]} tree {key[1]}" for index in indexes if index not in present]
+    for tree in pooled["trees"]:
+        for result in tree["results"]:
+            present = [entry["job"] for entry in result["job_ratios"]]
+            for job in tree["jobs"]:
+                if job["job"] not in present:
+                    incomplete.append(f"job {job['job']} has no pairs of {result['tool']} in the {tree['mode']} tree {tree['id']}")
+    pooled["incomplete_jobs"] = incomplete
     pooled["tools"] = {}
     for tree in pooled["trees"]:
         for result in tree["results"]:
@@ -156,16 +182,22 @@ def pool(docs, warnings):
 
 def jobs_markdown(platform, doc):
     lines = ["", f"**{platform}: ratio of each job**", ""]
-    header = ["Tree", "Tool"] + [f"Job {job['job']}" for job in doc["jobs"]] + ["Pooled"]
+    header = ["Tree", "Tool"] + [f"Job {job['job']}" for job in doc["jobs"]] + ["Pooled", "Faster jobs", "Interval of the job median"]
     lines.append("| " + " | ".join(header) + " |")
-    lines.append("| --- | --- |" + " ---: |" * (len(doc["jobs"]) + 1))
+    lines.append("| --- | --- |" + " ---: |" * (len(doc["jobs"]) + 1) + " --- | --- |")
     for tree in doc["trees"]:
         for r in tree["results"]:
             if r["diagnostic"]:
                 continue
             by_job = {entry["job"]: entry for entry in r["job_ratios"]}
             cells = [f"{by_job[job['job']]['ratio_median']:.3f}" if job["job"] in by_job else "n/a" for job in doc["jobs"]]
-            lines.append(f"| {tree['mode']} {tree['id']} | {r['label']} | " + " | ".join(cells) + f" | {r['ratio_median']:.3f} |")
+            interval = r["job_median_interval"]
+            cells += [
+                f"{r['ratio_median']:.3f}",
+                f"{r['jobs_minimenta_faster']} / {r['jobs_tool_faster']}",
+                f"{interval[0]:.3f} to {interval[1]:.3f}" if interval else "n/a",
+            ]
+            lines.append(f"| {tree['mode']} {tree['id']} | {r['label']} | " + " | ".join(cells) + " |")
     lines.append("")
     lines.append("CPUs: " + ", ".join(f"job {job['job']} {job['runner'].get('cpu')}" for job in doc["jobs"]) + ".")
     return lines
@@ -215,6 +247,7 @@ def main():
             jobs[name] = sorted(each, key=lambda d: d["job_index"])
     missing = [p for p in ("linux", "macos", "windows") if p not in platforms]
     missing_jobs = {name: doc["missing_jobs"] for name, doc in platforms.items() if doc.get("missing_jobs")}
+    incomplete = {name: doc["incomplete_jobs"] for name, doc in platforms.items() if doc.get("incomplete_jobs")}
     docs = [doc for each in by_platform.values() for doc in each]
     merged = {
         "schema": 1,
@@ -225,6 +258,7 @@ def main():
         "ref": docs[0].get("ref"),
         "missing_platforms": missing,
         "missing_jobs": missing_jobs,
+        "incomplete_jobs": incomplete,
         "notes": NOTES,
         "platforms": {name: platforms[name] for name in sorted(platforms)},
         "job_documents": {name: jobs[name] for name in sorted(jobs)},
@@ -249,6 +283,8 @@ def main():
         sys.exit(f"merge_speed: missing platforms: {', '.join(missing)}")
     if missing_jobs:
         sys.exit("merge_speed: missing jobs: " + ", ".join(f"{name} {jobs}" for name, jobs in missing_jobs.items()))
+    if incomplete:
+        sys.exit("merge_speed: incomplete jobs: " + "; ".join(f"{name}: {', '.join(items)}" for name, items in incomplete.items()))
     _ = datetime
 
 

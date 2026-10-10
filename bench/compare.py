@@ -27,6 +27,7 @@ Usage: python -I bench/compare.py --out FILE --tools-dir DIR \\
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import re
@@ -336,6 +337,23 @@ def verdict(median, q1, q3):
     return "minimenta" if median > 1.0 else "tool"
 
 
+def median_interval(values):
+    """Returns an interval that holds the median of the population of the values
+    with a probability of at least 95 percent, or None for fewer than 6 values.
+    The interval is the k-th lowest and the k-th highest value, with the largest
+    k for which 2 * P(Binomial(n, 1/2) < k) is at most 0.05. It assumes only
+    that the values are independent draws from one population."""
+    ordered = sorted(values)
+    n = len(ordered)
+    k, below = 0, 0
+    while k < n and 40 * (below + math.comb(n, k)) <= 2**n:
+        below += math.comb(n, k)
+        k += 1
+    if k == 0:
+        return None
+    return ordered[k - 1], ordered[n - k]
+
+
 def summarize(tool, tm, tt, codes, estimated):
     ratios = [t / m for t, m in zip(tt, tm)]
     q1, q3 = quartiles(ratios)
@@ -360,7 +378,7 @@ def summarize(tool, tm, tt, codes, estimated):
         "verdict": verdict(median, q1, q3),
         "times_ms": [round(t * 1000, 1) for t in tt],
         "minimenta_times_ms": [round(t * 1000, 1) for t in tm],
-        "ratios": [round(r, 3) for r in ratios],
+        "ratios": [round(r, 6) for r in ratios],
         "exit_codes": sorted(set(codes)),
     }
 

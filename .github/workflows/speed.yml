@@ -27,10 +27,11 @@ defaults:
 
 jobs:
   # On Linux, minimenta and `ncdu -t 64` are close. In the harness gap study
-  # (docs/experiments.md), the median ratio of one job went from 0.95 to 1.13
-  # with the runner. One job with 6 to 8 pairs cannot show a difference of a
-  # few percent. So six jobs run at least 12 pairs each, and
-  # bench/merge_speed.py judges the pairs of all jobs together.
+  # (docs/experiments.md), the medians of 12 jobs with 10 to 12 pairs each
+  # went from 0.95 to 1.13. One job with 6 to 8 pairs cannot show a
+  # difference of a few percent. So six jobs on different runners run at
+  # least 12 pairs each. bench/merge_speed.py pools their pairs and gives an
+  # interval for the median of the job medians.
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -145,9 +146,15 @@ jobs:
         with:
           pattern: speed-*
           path: speeds
+      # The names exclude a speed-merged artifact of an earlier attempt. A
+      # missing file gives no argument, so the script names what is missing.
       - name: Merge the documents
-        run: python3 -I bench/merge_speed.py speed-merged.json speeds/*/speed-*.json
+        run: |
+          shopt -s nullglob
+          python3 -I bench/merge_speed.py speed-merged.json speeds/*/speed-linux.json speeds/*/speed-macos.json speeds/*/speed-windows.json
+      # The script writes the file before it fails for a missing job or platform.
       - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
         with:
           name: speed-merged
           path: speed-merged.json
