@@ -61,10 +61,10 @@ const LIMITS: Limits = Limits {
 
 /// Items per window of the detector. The limits below were fitted to windows
 /// of this size, which gives about 180 windows for `/usr`. On the runners, a
-/// cold scan of `/usr` took about 39 ms per window and a warm scan about 3.7 ms
-/// per window over 180 windows (about 6 ms per closed window, because a warm
-/// scan closes about 120 windows). Runs 37986765908 and 37990715838 have the
-/// data. The size was chosen and not tuned.
+/// cold scan of `/usr` took about 39 ms per window. A warm scan took about
+/// 3.7 ms per window over 180 windows. It closes only about 120 windows, so a
+/// closed warm window took about 6 ms. Runs 37986765908 and 37990715838 have
+/// the data. The size was chosen and not tuned.
 const WINDOW_ITEMS: u64 = 4096;
 /// A window shorter than this is skipped and joins the next one. A warm scan of
 /// `/usr` closed 120 of its 180 possible windows, so about a third of the warm
