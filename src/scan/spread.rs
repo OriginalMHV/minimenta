@@ -3,11 +3,12 @@
 //! A cold scan waits for the disk. The directories of one parent sit next to
 //! each other on the disk, so threads that follow the tree read the same part
 //! of the disk at the same time. On the virtual disks of cloud machines this
-//! kept the request rate at about 75% of what the disk serves. Directories in
+//! kept the request rate at about 78% of what the disk serves. Directories in
 //! random order raised it. A cold scan of `/usr` on GitHub runners took about
-//! 0.90x (SCSI disk) and 0.87x (`NVMe` disk) of the time of the earlier scanner.
-//! The row "Spread the directory reads" in `docs/experiments.md` has the runs.
-//! Spinning disks, network drives and local `NVMe` disks were not measured.
+//! 0.92x (SCSI disk) and 0.89x (`NVMe` disk) of the time of the earlier scanner.
+//! The row "Spread the directory reads with lazy paths and split ranges" in
+//! `docs/experiments.md` has the runs. Spinning disks, network drives and local
+//! `NVMe` disks were not measured.
 //!
 //! The scheduler keeps a pool of directories that wait for a scan. A thread
 //! that lists a directory puts its subdirectories into the pool, and starts
@@ -59,9 +60,11 @@ const LIMITS: Limits = Limits {
 };
 
 /// Items per window of the detector. The limits below were fitted to windows
-/// of this size, which gives about 180 windows for `/usr`. A cold scan of
-/// `/usr` took about 36 ms per window and a warm scan about 2.7 ms on average.
-/// The size was chosen and not tuned.
+/// of this size, which gives about 180 windows for `/usr`. On the runners, a
+/// cold scan of `/usr` took about 39 ms per window and a warm scan about 3.7 ms
+/// per window over 180 windows (about 6 ms per closed window, because a warm
+/// scan closes about 120 windows). Runs 37986765908 and 37990715838 have the
+/// data. The size was chosen and not tuned.
 const WINDOW_ITEMS: u64 = 4096;
 /// A window shorter than this is skipped and joins the next one. A warm scan of
 /// `/usr` closed 120 of its 180 possible windows, so about a third of the warm
@@ -72,7 +75,7 @@ const KEEP: f64 = 0.5;
 /// A scan turns cold when the smoothed busy share falls below this value.
 /// Warm scans of `/usr` kept at least 85% of the CPUs busy in 95% of the
 /// windows. The median window of a cold scan kept 23% to 47% busy (240 scans
-/// on 6 runners, 26% to 42% per runner). All data comes from runners with
+/// on 6 runners, 25% to 42% per runner). All data comes from runners with
 /// 4 vCPUs. Machines with more CPUs, or with other busy threads in the
 /// process, were not measured.
 const ENTER_COLD: f64 = 0.55;
