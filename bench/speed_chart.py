@@ -23,6 +23,9 @@ How the chart values come from the data:
 4. In one run, the value of a tool is the ratio of the baseline divided by the
    ratio of the tool. The value of minimenta is the ratio of the baseline.
 5. With several runs, the value is the median of the values of the runs.
+   A run can time a platform in several jobs on different runners. Then
+   bench/merge_speed.py has pooled the pairs of these jobs, and the ratio of
+   the run is the median over the pairs of all its jobs.
 6. The chart shows one decimal. An exact tie rounds against minimenta: the value of
    minimenta rounds down and the value of every other tool rounds up.
 7. A bar has 24 characters at most. Its number of # characters is the shown value divided
@@ -32,6 +35,18 @@ How the chart values come from the data:
 In the tables, a tie rounds down for the ratio and for the bounds of the middle
 half, and in the direction that is worse for minimenta for times. With several
 runs, a table value is the median of the values of the runs, and the pairs add up.
+
+A tree with pooled jobs also gets a table of the job medians of all runs. It
+shows the number of jobs, the jobs in which each tool was faster, the median of
+the job medians, a 95 percent interval for the median of the population of job
+medians (median_interval in bench/compare.py) and the median of the job medians
+of each run. Its result is minimenta when the interval is above 1 and the
+median of each run is above 1, the tool when both are below 1, and "no clear
+difference" in all other cases.
+
+The script stops when a run misses jobs or has incomplete jobs, unless
+--allow-incomplete is given. It also stops when a tree mixes runs with pooled
+jobs and runs without them.
 """
 
 import argparse
@@ -40,6 +55,10 @@ import os
 import sys
 from fractions import Fraction
 from xml.sax.saxutils import escape
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from compare import median_interval  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BEGIN = "<!-- speed-tables:begin -->"
@@ -140,7 +159,7 @@ class Series:
         return sum(row[field] for row in self.rows)
 
 
-def load(paths):
+def load(paths, allow_incomplete):
     runs = [Run(path) for path in paths]
     seen = set()
     for run in runs:
@@ -149,6 +168,12 @@ def load(paths):
         seen.add(run.id)
         for platform in run.doc.get("missing_platforms") or []:
             print(f"speed_chart: run {run.id} has no data for {platform}", file=sys.stderr)
+        problems = [f"{platform} misses the jobs {jobs}" for platform, jobs in (run.doc.get("missing_jobs") or {}).items()]
+        problems += [f"{platform}: {', '.join(items)}" for platform, items in (run.doc.get("incomplete_jobs") or {}).items()]
+        if problems and not allow_incomplete:
+            die(f"run {run.id} has missing or incomplete jobs: {'. '.join(problems)}")
+        for problem in problems:
+            print(f"speed_chart: run {run.id}: {problem}", file=sys.stderr)
     return runs
 
 
@@ -199,6 +224,13 @@ def count_range(values, unit=""):
     return f"{text} {unit}".strip()
 
 
+def runners_of(info):
+    """Lists the runner of each job of a platform document."""
+    if info.get("jobs"):
+        return [job["runner"] for job in info["jobs"]]
+    return [info["runner"]]
+
+
 def tree_path(platform, path):
     return path.replace("/", "\\") if platform == "windows" else path
 
@@ -235,7 +267,7 @@ def build_chart(runs):
         note = None
         if not has_ncdu:
             note = f"Relative to {series[baseline].first['label']}. ncdu does not run on {name}."
-        runner_cores = sorted({run.platforms[platform]["runner"]["cores"] for run in runs if platform in run.platforms})
+        runner_cores = sorted({runner["cores"] for run in runs if platform in run.platforms for runner in runners_of(run.platforms[platform])})
         facts = {
             "name": name,
             "cores": count_range(runner_cores, "cores") if len(runner_cores) > 1 else f"{runner_cores[0]} cores",
@@ -362,9 +394,15 @@ def runs_table(runs):
         for platform, name in PLATFORMS:
             info = run.platforms.get(platform)
             if info:
-                runner = info["runner"]
-                where = f"{name}, administrator" if runner.get("elevated") and platform == "windows" else name
-                runner_rows.append([run.id, where, runner["cpu"].replace("|", "/"), str(runner["cores"])])
+                kinds = {}
+                for runner in runners_of(info):
+                    kind = (runner["cpu"], runner["cores"], bool(runner.get("elevated")) and platform == "windows")
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                for (cpu, cores, admin), count in kinds.items():
+                    where = f"{name}, administrator" if admin else name
+                    if info.get("jobs"):
+                        where += f", {count} job{'s' if count != 1 else ''}"
+                    runner_rows.append([run.id, where, cpu.replace("|", "/"), str(cores)])
     lines = ["**Runs**", ""]
     lines += md_table(["Run", "Date", "Commit"], run_rows)
     if any(run.doc.get("pull_request_head") for run in runs):
@@ -389,6 +427,11 @@ def tree_table(runs, key, name, chart_keys):
     items = count_range([row["items"] for row in base_rows.rows], "items")
     lines = [tree_title(name, key, series), ""]
     intro = [items]
+    jobs = [row.get("jobs", 1) for each in series.values() if not each.first["diagnostic"] for row in each.rows]
+    if max(jobs) > 1 and min(jobs) == 1:
+        die(f"the {key[1]} tree {key[2]} on {name} mixes runs with pooled jobs and runs without them")
+    if max(jobs) > 1:
+        intro.append(f"Each run pools the pairs of {count_range(jobs)} jobs on different runners")
     speed = None
     if mode == "cold":
         baseline, speed = speed_values(runs, key)
@@ -408,7 +451,7 @@ def tree_table(runs, key, name, chart_keys):
     for tool, each in series.items():
         ratio = each.median("ratio_median")
         q1, q3 = each.median("ratio_q1"), each.median("ratio_q3")
-        versions = sorted({row["version"] for row in each.rows})
+        versions = sorted({row["version"] or "n/a" for row in each.rows})
         label = each.first["label"]
         if each.first["diagnostic"]:
             label += " (setting check)"
@@ -431,6 +474,51 @@ def tree_table(runs, key, name, chart_keys):
     lines += md_table(header, rows, align)
     if speed:
         lines += ["", f"The speed value of minimenta is {fixed(speed['minimenta'], 1, DOWN)}x. It is the ratio of the baseline."]
+    if max(jobs) > 1:
+        lines += ["", *job_table(series)]
+    return lines
+
+
+def job_result(each, interval, run_medians):
+    if interval and interval[0] > 1 and all(m > 1 for m in run_medians):
+        return "default scan" if each.first["tool"].startswith("minimenta") else "minimenta"
+    if interval and interval[1] < 1 and all(m < 1 for m in run_medians):
+        return each.first["label"]
+    return "no clear difference"
+
+
+def job_table(series):
+    """The job medians of all runs for each tool of a tree with pooled jobs."""
+    rows = []
+    for each in series.values():
+        if each.first["diagnostic"]:
+            continue
+        if any(row.get("jobs", 1) != len(row.get("job_medians", [])) for row in each.rows):
+            die(f"a run has no job medians for {each.first['label']}. Merge it again with bench/merge_speed.py.")
+        medians = [m for row in each.rows for m in row["job_medians"]]
+        run_medians = [median(row["job_medians"]) for row in each.rows]
+        interval = median_interval(medians)
+        rows.append(
+            [
+                each.first["label"],
+                str(len(medians)),
+                f"{sum(m > 1 for m in medians)}{NBSP}/{NBSP}{sum(m < 1 for m in medians)}",
+                fixed(median(medians), 3, DOWN),
+                f"{fixed(interval[0], 3, DOWN)}{NBSP}to{NBSP}{fixed(interval[1], 3, DOWN)}" if interval else "n/a",
+                f"{NBSP}/{NBSP}".join(fixed(m, 3, DOWN) for m in run_medians),
+                job_result(each, interval, run_medians),
+            ]
+        )
+    lines = [
+        "Each job ran on its own runner. Faster jobs shows the jobs in which minimenta was faster in the median, then the jobs in which the tool was. "
+        "The interval holds the true median of the job medians with a probability of at least 95 percent. The true median is the median of a very large number of jobs. "
+        "In general, it gets narrower with more jobs. The middle half does not. "
+        "Run medians shows the median of the job medians of each run. "
+        "The result names a tool only when the interval and every run median are on its side of 1.",
+        "",
+    ]
+    header = ["Tool", "Jobs", "Faster jobs", "Median of the job medians", "Interval (95 percent)", "Run medians", "Result"]
+    lines += md_table(header, rows, ["---", "---:", "---", "---:", "---", "---", "---"])
     return lines
 
 
@@ -504,8 +592,9 @@ def main():
     parser.add_argument("--svg", default=os.path.join(ROOT, "docs", "assets", "speed.svg"), help="default: docs/assets/speed.svg")
     parser.add_argument("--readme", default=os.path.join(ROOT, "README.md"), help="default: README.md")
     parser.add_argument("--check", action="store_true", help="write nothing, exit 1 when an output differs")
+    parser.add_argument("--allow-incomplete", action="store_true", help="use runs with missing or incomplete jobs")
     args = parser.parse_args()
-    runs = load(args.files)
+    runs = load(args.files, args.allow_incomplete)
     blocks = build_chart(runs)
     svg = render_svg(blocks, runs)
     readme = read_text(args.readme)

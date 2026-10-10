@@ -17,13 +17,17 @@ Before it times anything, the script also runs every tool once on each tree,
 and compares the totals. A tool that reports a far lower total than
 minimenta may skip work, so the script marks that total.
 
+With --job N/M, the document is job N of M jobs that run the same comparison
+on different runners. bench/merge_speed.py pools the pairs of these jobs.
+
 Usage: python -I bench/compare.py --out FILE --tools-dir DIR \\
-           [--cold ID=PATH]... [--warm ID=PATH]... [--minimenta EXE]
+           [--cold ID=PATH]... [--warm ID=PATH]... [--minimenta EXE] [--job N/M]
 """
 
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import re
@@ -333,6 +337,24 @@ def verdict(median, q1, q3):
     return "minimenta" if median > 1.0 else "tool"
 
 
+def median_interval(values):
+    """Returns a 95 percent interval for the median of the population that the
+    values come from, or None for fewer than 6 values. The interval holds that
+    median with a probability of at least 95 percent. Its ends are the k-th
+    lowest and the k-th highest value. k is the largest number for which
+    2 * P(Binomial(n, 1/2) < k) is at most 0.05. The values must be independent
+    draws from one population. No other assumption is necessary."""
+    ordered = sorted(values)
+    n = len(ordered)
+    k, below = 0, 0
+    while k < n and 40 * (below + math.comb(n, k)) <= 2**n:
+        below += math.comb(n, k)
+        k += 1
+    if k == 0:
+        return None
+    return ordered[k - 1], ordered[n - k]
+
+
 def summarize(tool, tm, tt, codes, estimated):
     ratios = [t / m for t, m in zip(tt, tm)]
     q1, q3 = quartiles(ratios)
@@ -357,7 +379,7 @@ def summarize(tool, tm, tt, codes, estimated):
         "verdict": verdict(median, q1, q3),
         "times_ms": [round(t * 1000, 1) for t in tt],
         "minimenta_times_ms": [round(t * 1000, 1) for t in tm],
-        "ratios": [round(r, 3) for r in ratios],
+        "ratios": [round(r, 6) for r in ratios],
         "exit_codes": sorted(set(codes)),
     }
 
@@ -465,6 +487,7 @@ def run_section(args, runner, mode, tree_id, path, cores):
         "round_cost_s": round(round_cost, 1),
         "estimated_pairs": estimated,
         "max_pairs": limit,
+        "min_pairs": args.min_pairs,
     }
 
     for _ in range(warmup):
@@ -555,7 +578,7 @@ def pull_request_head():
 def environment(args, cores):
     head, number = pull_request_head()
     env = os.environ
-    return {
+    doc = {
         "schema": SCHEMA,
         "platform": PLAT,
         "date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -580,6 +603,19 @@ def environment(args, cores):
             "elevated": elevated(),
         },
     }
+    if args.job:
+        doc["job_index"], doc["job_count"] = args.job
+    return doc
+
+
+def job_spec(text):
+    try:
+        index, count = (int(part) for part in text.split("/"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not N/M") from None
+    if not 1 <= index <= count:
+        raise argparse.ArgumentTypeError(f"{text!r} needs 1 <= N <= M")
+    return index, count
 
 
 def elevated():
@@ -594,7 +630,8 @@ def elevated():
 
 
 def markdown(doc):
-    lines = [f"### Speed on {doc['platform']}", ""]
+    job = f", job {doc['job_index']} of {doc['job_count']}" if doc.get("job_count") else ""
+    lines = [f"### Speed on {doc['platform']}{job}", ""]
     lines.append(f"Run {doc.get('run_id')}, commit `{(doc.get('commit') or '')[:12]}`, {doc['runner']['cores']} cores, {doc['date']}.")
     for tree in doc["trees"]:
         lines += ["", f"**{tree['mode']} {tree['id']}** `{tree['path']}`, {tree['items']} items", ""]
@@ -640,6 +677,7 @@ def main():
     parser.add_argument("--warm-budget", type=int, default=240, help="seconds per warm tree")
     parser.add_argument("--timeout", type=int, default=900, help="seconds for one run")
     parser.add_argument("--allow-missing", action="store_true", help="skip tools that are not installed (local tests)")
+    parser.add_argument("--job", type=job_spec, help="N/M: this is job N of M jobs with the same comparison")
     args = parser.parse_args()
 
     cores = os.cpu_count() or 1
