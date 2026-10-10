@@ -338,11 +338,12 @@ def verdict(median, q1, q3):
 
 
 def median_interval(values):
-    """Returns an interval that holds the median of the population of the values
-    with a probability of at least 95 percent, or None for fewer than 6 values.
-    The interval is the k-th lowest and the k-th highest value, with the largest
-    k for which 2 * P(Binomial(n, 1/2) < k) is at most 0.05. It assumes only
-    that the values are independent draws from one population."""
+    """Returns a 95 percent interval for the median of the population that the
+    values come from, or None for fewer than 6 values. The interval holds that
+    median with a probability of at least 95 percent. Its ends are the k-th
+    lowest and the k-th highest value. k is the largest number for which
+    2 * P(Binomial(n, 1/2) < k) is at most 0.05. The values must be independent
+    draws from one population. No other assumption is necessary."""
     ordered = sorted(values)
     n = len(ordered)
     k, below = 0, 0
@@ -486,6 +487,7 @@ def run_section(args, runner, mode, tree_id, path, cores):
         "round_cost_s": round(round_cost, 1),
         "estimated_pairs": estimated,
         "max_pairs": limit,
+        "min_pairs": args.min_pairs,
     }
 
     for _ in range(warmup):

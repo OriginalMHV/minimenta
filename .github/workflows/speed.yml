@@ -152,10 +152,11 @@ jobs:
         run: |
           shopt -s nullglob
           python3 -I bench/merge_speed.py speed-merged.json speeds/*/speed-linux.json speeds/*/speed-macos.json speeds/*/speed-windows.json
-      # The script writes the file before it fails for a missing job or platform.
+      # The script writes the file before it fails for a missing platform or a
+      # missing or incomplete job.
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: speed-merged
           path: speed-merged.json
-          if-no-files-found: error
+          if-no-files-found: warn

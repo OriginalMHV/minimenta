@@ -11,11 +11,11 @@ A platform can have several documents from bench/compare.py --job N/M, one per
 job. The script pools them into one platform document of the same form: the
 pairs of all jobs form one sample, and the ratio, middle half and verdict come
 from all pairs together. Each pooled row also lists the median ratio of each
-job and an interval for the median of the job medians, which holds it with a
-probability of at least 95 percent (see median_interval in bench/compare.py).
-The documents of the jobs stay unchanged under "job_documents". A job that is
-missing, or that misses a tree or a tool, fails the merge after the merged
-document is written.
+job and a 95 percent interval for the median of the job medians (see
+median_interval in bench/compare.py). The documents of the jobs stay unchanged
+under "job_documents". A job that is missing, that misses a tree or a tool, or
+that has fewer pairs than its minimum fails the merge. The merged document is
+written first.
 """
 
 import datetime
@@ -76,7 +76,8 @@ def pool_result(index_results, warnings, where):
     versions = sorted({result["version"] for result in results if result["version"] is not None})
     if len(versions) < len({result["version"] for result in results}):
         warnings.append(f"{where} {first['tool']}: some jobs found no version")
-    job_medians = [result["ratio_median"] for result in results]
+    # The ratio_median of a job has 3 decimals. The median of its ratios is more exact.
+    job_medians = [round(statistics.median(result["ratios"]), 6) for result in results]
     interval = median_interval(job_medians)
     return {
         "tool": first["tool"],
@@ -101,7 +102,7 @@ def pool_result(index_results, warnings, where):
         "ratios": ratios,
         "exit_codes": sorted({code for result in results for code in result["exit_codes"]}),
         "jobs": len(results),
-        "job_ratios": [{"job": index, "pairs": result["pairs"], "ratio_median": result["ratio_median"]} for index, result in index_results],
+        "job_ratios": [{"job": index, "pairs": result["pairs"], "ratio_median": m} for (index, result), m in zip(index_results, job_medians)],
         "jobs_minimenta_faster": sum(m > 1.0 for m in job_medians),
         "jobs_tool_faster": sum(m < 1.0 for m in job_medians),
         "job_median_interval": list(interval) if interval else None,
@@ -166,12 +167,16 @@ def pool(docs, warnings):
     for key in keys:
         present = [index for index, _ in parts[key]]
         incomplete += [f"job {index} misses the {key[0]} tree {key[1]}" for index in indexes if index not in present]
-    for tree in pooled["trees"]:
+    for key, tree in zip(keys, pooled["trees"]):
+        minimum = {index: part["plan"].get("min_pairs", 0) for index, part in parts[key] if part.get("plan")}
         for result in tree["results"]:
             present = [entry["job"] for entry in result["job_ratios"]]
             for job in tree["jobs"]:
                 if job["job"] not in present:
                     incomplete.append(f"job {job['job']} has no pairs of {result['tool']} in the {tree['mode']} tree {tree['id']}")
+            for entry in result["job_ratios"]:
+                if entry["pairs"] < minimum.get(entry["job"], 0):
+                    incomplete.append(f"job {entry['job']} has {entry['pairs']} pairs of {result['tool']} in the {tree['mode']} tree {tree['id']}, fewer than its minimum")
     pooled["incomplete_jobs"] = incomplete
     pooled["tools"] = {}
     for tree in pooled["trees"]:
@@ -284,7 +289,7 @@ def main():
     if missing_jobs:
         sys.exit("merge_speed: missing jobs: " + ", ".join(f"{name} {jobs}" for name, jobs in missing_jobs.items()))
     if incomplete:
-        sys.exit("merge_speed: incomplete jobs: " + "; ".join(f"{name}: {', '.join(items)}" for name, items in incomplete.items()))
+        sys.exit("merge_speed: incomplete jobs: " + ". ".join(f"{name}: {', '.join(items)}" for name, items in incomplete.items()))
     _ = datetime
 
 
