@@ -199,6 +199,8 @@ else
     --jq '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | length')" \
     || fail "could not read the checks of PR #$pr"
   [[ "$not_passed" == 0 ]] || fail "$not_passed checks on PR #$pr did not pass. Run them again, then run the script again."
+  [[ -z "$(git rev-list origin/main..refs/heads/main)" ]] \
+    || fail "main has commits that are not on GitHub. Move them to a branch, reset main to origin/main, and run the script again."
   confirm "Merge PR #$pr into main?"
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch \
     --subject "chore: release $tag (#$pr)" --body ""
@@ -238,7 +240,8 @@ else
     git tag -s "$tag" -m "$tag"
   fi
   before="$(gh run list --repo "$REPO" --workflow release.yml --branch "$tag" --event push --limit 1 \
-    --json databaseId --jq '.[0].databaseId // 0')" || before=0
+    --json databaseId --jq '.[0].databaseId // 0')" \
+    || fail "could not read the release runs. Check gh, then run the script again. The tag is not pushed yet."
   git push --quiet origin "refs/tags/$tag"
 fi
 tag_commit="$(git rev-parse "$tag^{commit}")"
@@ -285,7 +288,7 @@ else
 fi
 
 bold "Released $tag"
-echo "GitHub:    $(gh release view "$tag" --repo "$REPO" --json url --jq .url)"
+echo "GitHub:    $REPO_URL/releases/tag/$tag"
 echo "crates.io: https://crates.io/crates/$CRATE/$version"
 echo "Homebrew:  brew install $BREW_NAME"
 echo "Now do the checks in RELEASING.md, \"Verify a release\"."
