@@ -58,14 +58,33 @@ pub fn scan(terminal: &mut DefaultTerminal, path: &Path, opts: Options) -> io::R
             let [header, _, body, _, footer] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(5),
+                Constraint::Length(6),
                 Constraint::Fill(1),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
             frame.render_widget(view::header_bar(), header);
-            let lines = vec![
-                Line::from(format!("  Scanning {}", display_path(path))),
+            let checking = progress.checking_cache.load(Relaxed);
+            let mut lines = vec![Line::from(format!("  Scanning {}", display_path(path)))];
+            if checking {
+                lines.push(Line::from(
+                    "  Checking the cache for changes since the last scan",
+                ));
+            } else if progress.cache_unusable.load(Relaxed) {
+                lines.push(Line::from(
+                    "  minimenta could not use the cache and scans all folders again",
+                ));
+            }
+            let limit = match progress.check_limit_ms.load(Relaxed) {
+                ms if checking && ms > 0 => {
+                    format!(
+                        "   (the check gives up after about {} s)",
+                        ms.div_ceil(1000)
+                    )
+                }
+                _ => String::new(),
+            };
+            lines.extend([
                 Line::from(""),
                 Line::from(format!("  Items:  {}", progress.items.load(Relaxed))),
                 Line::from(format!(
@@ -73,14 +92,14 @@ pub fn scan(terminal: &mut DefaultTerminal, path: &Path, opts: Options) -> io::R
                     format_size(progress.disk.load(Relaxed)).trim_start()
                 )),
                 Line::from(format!(
-                    "  Time:   {:.1} s{}",
+                    "  Time:   {:.1} s{limit}{}",
                     start.elapsed().as_secs_f64(),
                     match progress.errors.load(Relaxed) {
                         0 => String::new(),
                         n => format!("   ({n} directories could not be read)"),
                     }
                 )),
-            ];
+            ]);
             frame.render_widget(Paragraph::new(lines), body);
             frame.render_widget(view::bar(" Esc cancel   q quit"), footer);
         })?;

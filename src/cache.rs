@@ -65,8 +65,18 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     let root = path.canonicalize()?;
     let use_cache = opts.cache && cache_allowed();
     #[cfg(target_os = "macos")]
-    if use_cache && let Some(result) = incremental(&root, opts, progress) {
-        return result;
+    if use_cache {
+        if let Some(result) = incremental(&root, opts, progress) {
+            return result;
+        }
+        // The check can list folders before it gives up, and the full scan
+        // counts them again.
+        if progress.checking_cache.swap(false, Ordering::Relaxed) {
+            progress.items.store(0, Ordering::Relaxed);
+            progress.disk.store(0, Ordering::Relaxed);
+            progress.errors.store(0, Ordering::Relaxed);
+            progress.cache_unusable.store(true, Ordering::Relaxed);
+        }
     }
     let event_id = if use_cache { current_event_id() } else { None };
     // Taken before the scan, so a mount that appears during the scan is
@@ -104,6 +114,7 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
     use std::time::Duration;
 
     let bytes = std::sync::Arc::new(fs::read(file_for(root)?).ok()?);
+    progress.checking_cache.store(true, Relaxed);
     let (header, start) = decode_header(&bytes)?;
     // Decoding a large tree takes about as long as the checks and the
     // FSEvents replay below, so both run at the same time if a thread starts.
@@ -144,6 +155,11 @@ fn incremental(root: &Path, opts: &Options, progress: &Progress) -> Option<io::R
             .filter(|m| m.volume.is_some() && header.mounts.contains(m));
         streams.extend(kept.map(|m| m.path.clone()));
     }
+    let limit = budget.saturating_mul(u32::try_from(streams.len()).unwrap_or(u32::MAX));
+    progress.check_limit_ms.store(
+        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+        Relaxed,
+    );
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
     for stream in &streams {
         let Some(events) =
@@ -1180,6 +1196,38 @@ mod tests {
                 matches!(run.source, Source::Scanned),
                 "used a cache older than the limit"
             );
+        }
+
+        /// The progress screen says when the cache could not be used, and the
+        /// full scan counts from 0 again.
+        #[test]
+        fn a_cache_that_cannot_be_used_restarts_the_counters() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            write(&f.root, "a/b.bin", 1000);
+            let first = Progress::default();
+            scan(&f.root, &opts(), &first).unwrap();
+            flush();
+            assert!(!first.checking_cache.load(Relaxed));
+            assert!(
+                !first.cache_unusable.load(Relaxed),
+                "there was no cache yet"
+            );
+            let (mut header, dir) = load(&f.root).unwrap();
+            header.full_scan_at -= MAX_AGE_SECS + 1;
+            save_in_background(&header, &dir);
+            flush();
+            let progress = Progress::default();
+            // Stands for the folders that a check lists before it gives up.
+            progress.items.store(1000, Relaxed);
+            progress.errors.store(1, Relaxed);
+            let run = scan(&f.root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert!(!progress.checking_cache.load(Relaxed));
+            assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(progress.items.load(Relaxed), run.dir.totals().items);
+            assert_eq!(progress.errors.load(Relaxed), 0);
         }
 
         /// FSEvents reports `/Users/...` paths for a root given as
