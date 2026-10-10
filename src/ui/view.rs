@@ -277,36 +277,36 @@ const HELP: &[(&str, &str)] = &[
 ];
 
 fn draw_help(frame: &mut Frame, b: &Browser) {
-    let mut lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::from(format!(" {keys:<20}")).bold(),
-                Span::from(*what),
-            ])
-        })
-        .collect();
+    let mut lines: Vec<Line> = Vec::new();
+    for (keys, what) in HELP {
+        lines.push(Line::from(vec![
+            Span::from(format!(" {keys:<20}")).bold(),
+            Span::from(*what),
+        ]));
+        // A question that is off shows under its key. With both off, the
+        // help still fits a terminal of 24 rows.
+        let again = match *keys {
+            "d" if !b.ask_trash => Some('t'),
+            "D" if !b.ask_delete => Some('p'),
+            _ => None,
+        };
+        if let Some(again) = again {
+            lines.push(
+                Line::from(format!(
+                    "{:21}No question until you quit. Press {again} to ask again.",
+                    ""
+                ))
+                .bold(),
+            );
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(" Flags: ! read error  . error below  > other file system").dark_gray());
     lines.push(Line::from("        H hard link  @ symlink or special  e empty").dark_gray());
     lines.push(Line::from(""));
-    lines.push(asks_first('d', b.ask_trash, 't'));
-    lines.push(asks_first('D', b.ask_delete, 'p'));
-    lines.push(Line::from(""));
     lines.push(Line::from(" Press any key to close").dark_gray());
     let inner = popup(frame, 72, lines.len() as u16 + 2, "Help", Color::Reset);
     frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn asks_first(key: char, ask: bool, again: char) -> Line<'static> {
-    if ask {
-        Line::from(format!(" {key} asks first: yes")).dark_gray()
-    } else {
-        Line::from(format!(
-            " {key} asks first: no, until you quit. Press {again} to ask again."
-        ))
-        .bold()
-    }
 }
 
 fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usize]) {
@@ -334,32 +334,49 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         )
     };
     let shown = targets.len().min(6);
-    let mut lines = vec![
+    let mut body = vec![
         Line::from(format!(" {question}")).bold(),
         Line::from(format!(" {} in total", format_size(size).trim_start())),
     ];
-    lines.push(Line::from(""));
+    body.push(Line::from(""));
     for &i in &targets[..shown] {
         let e = &dir.entries[i];
         let slash = if e.kind == Kind::Dir { "/" } else { "" };
-        lines.push(Line::from(format!(
+        body.push(Line::from(format!(
             "   {slash}{}",
             String::from_utf8_lossy(dir.name(e))
         )));
     }
     if targets.len() > shown {
-        lines.push(Line::from(format!("   … and {} more", targets.len() - shown)).dark_gray());
+        body.push(Line::from(format!("   … and {} more", targets.len() - shown)).dark_gray());
     }
-    lines.push(Line::from(""));
-    let keys = if permanent {
-        " y yes   any other key: no"
+    let yes = if permanent {
+        " y: yes"
     } else {
-        " y or Enter: yes   any other key: no"
+        " y or Enter: yes"
     };
-    lines.push(Line::from(keys).dark_gray());
-    lines.push(Line::from(" Shift+A: yes, and do not ask again until you quit").dark_gray());
-    let inner = popup(frame, 60, lines.len() as u16 + 2, title, border);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let keys = vec![
+        Line::from(""),
+        Line::from(yes).dark_gray(),
+        Line::from(" Shift+A: yes, and do not ask again until you quit").dark_gray(),
+        Line::from(" Any other key: no").dark_gray(),
+    ];
+    // Long names wrap. The keys get their own area at the bottom, so they
+    // show even when the names do not fit.
+    let width = usize::from(
+        60.min(frame.area().width.saturating_sub(2))
+            .saturating_sub(2),
+    )
+    .max(1);
+    let rows: usize = body
+        .iter()
+        .map(|line| line.width().div_ceil(width).max(1))
+        .sum();
+    let inner = popup(frame, 60, (rows + keys.len() + 2) as u16, title, border);
+    let [top, bottom] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(keys.len() as u16)]).areas(inner);
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), top);
+    frame.render_widget(Paragraph::new(keys), bottom);
 }
 
 #[cfg(test)]

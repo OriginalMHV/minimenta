@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -127,6 +128,13 @@ impl Browser {
                 Action::Quit => return Ok(()),
                 Action::Delete { permanent, targets } => {
                     self.delete(terminal, permanent, &targets)?;
+                    // Keys typed during a slow delete must not start another
+                    // delete without a question.
+                    if !(self.ask_trash && self.ask_delete) {
+                        while event::poll(Duration::ZERO)? {
+                            event::read()?;
+                        }
+                    }
                 }
                 Action::Rescan => self.rescan(terminal)?,
                 Action::Undo => self.undo(),
@@ -423,13 +431,15 @@ impl Browser {
         } else {
             "Moved to the Trash:"
         };
-        let mut hint = if undoable { " Press u to undo." } else { "" }.to_string();
-        if !*self.ask_mut(permanent) {
-            hint.push_str(" Press ? to ask first again.");
-        }
+        let undo = if undoable { " Press u to undo." } else { "" };
+        let again = if *self.ask_mut(permanent) {
+            ""
+        } else {
+            " Press ? to ask first again."
+        };
         self.message = Some(match result {
-            Ok(()) => format!("{done} {}.{hint}", count(gone)),
-            Err(e) => format!("{done} {gone} of {}.{hint} Error: {e}", count(total)),
+            Ok(()) => format!("{done} {}.{undo}{again}", count(gone)),
+            Err(e) => format!("{done} {gone} of {}.{undo} Error: {e}", count(total)),
         });
         Ok(())
     }
@@ -774,6 +784,11 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    /// True when the action deletes item 0 the given way.
+    fn deletes_first(action: &Action, permanent: bool) -> bool {
+        matches!(action, Action::Delete { permanent: p, targets } if *p == permanent && *targets == [0])
+    }
+
     #[test]
     fn shift_a_stops_one_question_until_the_help_screen_turns_it_back_on() {
         for (permanent, same, other, again) in [(false, 'd', 'D', 't'), (true, 'D', 'd', 'p')] {
@@ -789,10 +804,14 @@ mod tests {
                 permanent,
                 targets: vec![0],
             };
-            assert!(matches!(browser.handle(key('A')), Action::Delete { .. }));
+            assert!(deletes_first(&browser.handle(key('A')), permanent));
+            // Only the question that was answered stops.
+            assert_eq!(
+                (browser.ask_trash, browser.ask_delete),
+                (permanent, !permanent)
+            );
             // The same key now deletes at once, and the other key still asks.
-            let action = browser.handle(key(same));
-            assert!(matches!(action, Action::Delete { permanent: p, .. } if p == permanent));
+            assert!(deletes_first(&browser.handle(key(same)), permanent));
             assert!(matches!(browser.mode, Mode::Browse));
             assert!(matches!(browser.handle(key(other)), Action::None));
             assert!(matches!(browser.mode, Mode::Confirm { .. }));
@@ -809,9 +828,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_help_screen_turns_on_only_the_question_it_names() {
+        let mut browser = browser_with(in_disk_order());
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        browser.mode = Mode::Help;
+        browser.handle(key('p'));
+        assert!(!browser.ask_trash && browser.ask_delete);
+        browser.handle(key('t'));
+        assert!(browser.ask_trash && browser.ask_delete);
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        browser.handle(key('t'));
+        assert!(browser.ask_trash && !browser.ask_delete);
+        assert!(matches!(browser.mode, Mode::Help));
+    }
+
+    #[test]
+    fn d_in_an_empty_folder_does_nothing_even_when_the_question_is_off() {
+        let mut browser = browser_with(Dir::default());
+        browser.stack = vec![0];
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        assert!(matches!(browser.handle(key('d')), Action::None));
+        assert!(matches!(browser.handle(key('D')), Action::None));
+        assert!(matches!(browser.mode, Mode::Browse));
+    }
+
+    /// The text of an 80x24 terminal, the smallest common size.
     fn screen(browser: &mut Browser) -> String {
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| view::draw(frame, browser)).unwrap();
         let buffer = terminal.backend().buffer();
         buffer
@@ -827,24 +872,41 @@ mod tests {
     }
 
     #[test]
-    fn the_popups_show_their_last_line() {
+    fn the_help_screen_shows_a_question_that_is_off_and_its_last_line() {
+        let mut browser = browser_with(in_disk_order());
+        browser.mode = Mode::Help;
+        let shown = screen(&mut browser);
+        assert!(shown.contains("Press any key to close"));
+        assert!(!shown.contains("No question"));
+        (browser.ask_trash, browser.ask_delete) = (false, false);
+        let shown = screen(&mut browser);
+        assert!(shown.contains("No question until you quit. Press t to ask again."));
+        assert!(shown.contains("No question until you quit. Press p to ask again."));
+        assert!(shown.contains("Press any key to close"));
+        browser.ask_trash = true;
+        let shown = screen(&mut browser);
+        assert!(!shown.contains("Press t to ask again"));
+        assert!(shown.contains("Press p to ask again"));
+    }
+
+    #[test]
+    fn the_question_shows_its_keys_with_many_items_and_long_names() {
         let mut folder = Dir::default();
         for i in 0..8 {
             folder.push(&[b'f', b'0' + i], Kind::File, 4096, 4096, 0);
         }
+        let long = [b'x'; 70];
+        folder.push(&long, Kind::File, 4096, 4096, 0);
+        folder.push(&long, Kind::File, 4096, 4096, 0);
         let mut browser = browser_with(folder);
         browser.stack = vec![0];
-        browser.mode = Mode::Help;
-        assert!(screen(&mut browser).contains("Press any key to close"));
-        browser.ask_delete = false;
-        assert!(screen(&mut browser).contains("D asks first: no"));
-        browser.mode = Mode::Confirm {
-            permanent: true,
-            targets: (0..8).collect(),
-        };
-        let shown = screen(&mut browser);
-        assert!(shown.contains("and 2 more"));
-        assert!(shown.contains("Shift+A: yes, and do not ask again"));
+        for (permanent, targets) in [(true, (0..8).collect()), (false, vec![8, 9])] {
+            browser.mode = Mode::Confirm { permanent, targets };
+            let shown = screen(&mut browser);
+            assert!(shown.contains("Shift+A: yes, and do not ask again"));
+            assert!(shown.contains("Any other key: no"));
+            assert!(shown.contains(if permanent { "and 2 more" } else { "xxxx" }));
+        }
     }
 
     #[test]
