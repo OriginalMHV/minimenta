@@ -58,7 +58,7 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
 
     match &b.mode {
         Mode::Browse => {}
-        Mode::Help => draw_help(frame),
+        Mode::Help => draw_help(frame, b),
         Mode::Confirm { permanent, targets } => draw_confirm(frame, b, *permanent, targets),
     }
 }
@@ -276,8 +276,7 @@ const HELP: &[(&str, &str)] = &[
     ("q", "Quit"),
 ];
 
-fn draw_help(frame: &mut Frame) {
-    let inner = popup(frame, 72, HELP.len() as u16 + 6, "Help", Color::Reset);
+fn draw_help(frame: &mut Frame, b: &Browser) {
     let mut lines: Vec<Line> = HELP
         .iter()
         .map(|(keys, what)| {
@@ -291,8 +290,23 @@ fn draw_help(frame: &mut Frame) {
     lines.push(Line::from(" Flags: ! read error  . error below  > other file system").dark_gray());
     lines.push(Line::from("        H hard link  @ symlink or special  e empty").dark_gray());
     lines.push(Line::from(""));
+    lines.push(asks_first('d', b.ask_trash, 't'));
+    lines.push(asks_first('D', b.ask_delete, 'p'));
+    lines.push(Line::from(""));
     lines.push(Line::from(" Press any key to close").dark_gray());
+    let inner = popup(frame, 72, lines.len() as u16 + 2, "Help", Color::Reset);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn asks_first(key: char, ask: bool, again: char) -> Line<'static> {
+    if ask {
+        Line::from(format!(" {key} asks first: yes")).dark_gray()
+    } else {
+        Line::from(format!(
+            " {key} asks first: no, until you quit. Press {again} to ask again."
+        ))
+        .bold()
+    }
 }
 
 fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usize]) {
@@ -320,7 +334,6 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         )
     };
     let shown = targets.len().min(6);
-    let inner = popup(frame, 60, shown as u16 + 7, title, border);
     let mut lines = vec![
         Line::from(format!(" {question}")).bold(),
         Line::from(format!(" {} in total", format_size(size).trim_start())),
@@ -344,6 +357,8 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         " y or Enter: yes   any other key: no"
     };
     lines.push(Line::from(keys).dark_gray());
+    lines.push(Line::from(" a: yes, and do not ask again until you quit").dark_gray());
+    let inner = popup(frame, 60, lines.len() as u16 + 2, title, border);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
