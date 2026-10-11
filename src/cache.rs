@@ -1863,6 +1863,41 @@ mod tests {
             );
         }
 
+        /// Listing `a` again fails only for `a`, which the tree then marks. The
+        /// second pass lists the folders with links, and the root is one of
+        /// them. The first run has no link in the root, so it needs no second
+        /// listing of the root and passes. This shows that the error of the
+        /// second run comes from the second pass.
+        #[test]
+        fn a_second_listing_that_fails_gives_the_error() {
+            let f = fixture();
+            let tree = |link_in_root: bool| {
+                let mut sub = Dir::default();
+                sub.push(b"f", Kind::File, 0, 1, flag::MULTI_LINK);
+                let mut dir = Dir::default();
+                dir.push(b"a", Kind::Dir, 0, 0, 0);
+                dir.attach(0, sub, 0);
+                if link_in_root {
+                    dir.push(b"g", Kind::File, 0, 1, flag::MULTI_LINK);
+                }
+                dir
+            };
+            let changes = || vec![(f.root.join("a"), false)];
+            fs::set_permissions(&f.root, fs::Permissions::from_mode(0o000)).unwrap();
+
+            let mut dir = tree(false);
+            let first = apply(&mut dir, &f.root, changes(), &opts(), &Progress::default());
+            assert!(matches!(first, Ok(Ok(()))), "{first:?}");
+
+            let mut dir = tree(true);
+            let miss = apply(&mut dir, &f.root, changes(), &opts(), &Progress::default())
+                .expect_err("a root that cannot be listed again needs a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::ListFailed("Permission denied (os error 13)".into())
+            );
+        }
+
         #[test]
         fn distinct_paths_count_each_path_once_whatever_the_flag() {
             let path = |p: &str, recursive| (PathBuf::from(p), recursive);
