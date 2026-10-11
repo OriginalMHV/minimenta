@@ -1246,7 +1246,8 @@ mod tests {
     }
 
     /// The progress screen shows `Reason: ` and the text on one line of an
-    /// 80-column terminal.
+    /// 80-column terminal. The tests of the progress screen draw the longest
+    /// texts, so they check the real prefix.
     #[cfg(target_os = "macos")]
     fn assert_text(cases: impl IntoIterator<Item = (CacheMiss, &'static str)>) {
         for (miss, text) in cases {
@@ -1541,6 +1542,30 @@ mod tests {
             );
         }
 
+        /// The volume ID comes from FSEvents. A cache of a volume with another
+        /// ID has event numbers that mean nothing now.
+        #[test]
+        fn a_cache_of_another_volume_gives_a_reason() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            write(&f.root, "a.bin", 1000);
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let (mut header, dir) = load(&f.root).unwrap();
+            header.volume[0] ^= 1;
+            save_in_background(&header, &dir);
+            flush();
+            let progress = Progress::default();
+            let run = scan(&f.root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The volume of the folder changed since the last scan.")
+            );
+        }
+
         /// The scan marks that the cache could not be used, and the full scan
         /// counts from 0 again. The item count of the cached scan
         /// stays for the estimate of the time left.
@@ -1687,6 +1712,31 @@ mod tests {
             );
         }
 
+        /// The header is good, so the checks and the replay pass. Only the
+        /// decoder of the tree finds the damage.
+        #[test]
+        fn a_cache_file_with_a_damaged_tree_gives_a_reason() {
+            let f = fixture();
+            write(&f.root, "a/b.bin", 1000);
+            // Let the setup events get IDs before the cache position, so the
+            // replay sees no event at all.
+            std::thread::sleep(Duration::from_millis(1500));
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let file = file_for(&f.root).unwrap();
+            let bytes = fs::read(&file).unwrap();
+            let (_, tree_start) = decode_header(&bytes).unwrap();
+            fs::write(&file, &bytes[..tree_start + 3]).unwrap();
+            let progress = Progress::default();
+            let run = scan(&f.root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The cache file is damaged or has another format version.")
+            );
+        }
+
         /// The user cancels while the check replays the history. The scan stops,
         /// so the screen has no message and no reason.
         #[test]
@@ -1762,6 +1812,54 @@ mod tests {
             assert_eq!(
                 miss,
                 CacheMiss::ListFailed("No such file or directory (os error 2)".into())
+            );
+        }
+
+        /// The user presses Esc while the check lists the changed folders again.
+        /// The cancel is an error of the scan and not a reason.
+        #[test]
+        fn a_cancel_while_listing_again_is_not_a_cache_miss() {
+            let f = fixture();
+            let progress = Progress::default();
+            progress
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let changes = vec![(f.root.join("a"), false)];
+            let mut dir = Dir::default();
+            let result = apply(&mut dir, &f.root, changes, &opts(), &progress);
+            assert!(
+                matches!(&result, Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted),
+                "{result:?}"
+            );
+        }
+
+        /// A change removes the links of one folder, so the check must list
+        /// every folder with links again. One folder more than the limit has links.
+        #[test]
+        fn more_folders_with_links_than_the_limit_give_the_count_and_the_limit() {
+            let f = fixture();
+            let mut dir = Dir::default();
+            for i in 0..=MAX_CHANGES + 1 {
+                let mut sub = Dir::default();
+                sub.push(b"f", Kind::File, 0, 1, flag::MULTI_LINK);
+                dir.push(format!("d{i}").as_bytes(), Kind::Dir, 0, 0, 0);
+                dir.attach(i, sub, 0);
+            }
+            // The folder is not on disk, so listing it again gives an error
+            // and the tree no longer counts its links.
+            let changes = vec![(f.root.join("d0"), true)];
+            let miss = apply(&mut dir, &f.root, changes, &opts(), &Progress::default())
+                .expect_err("more folders with links than the limit need a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::TooManyLinkedFolders {
+                    count: MAX_CHANGES + 1,
+                    limit: MAX_CHANGES
+                }
+            );
+            assert_eq!(
+                miss.to_string(),
+                "20001 folders have hard links. The limit is 20000 folders."
             );
         }
 

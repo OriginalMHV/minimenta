@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- macOS: when minimenta cannot use the cache, the progress screen gives the reason on a second line under the message. Examples are a cache older than 7 days, a replay that did not finish in its time limit, and more than 20,000 changes. For too many changes, the line shows the number of changes, the number of different folders among them, and the limit.
+- macOS: when minimenta cannot use the cache, the progress screen gives the reason on a second line under the message. Examples are a last full scan older than 7 days, a replay that did not finish in its time limit, and more than 20,000 changes. For too many changes, the line shows the number of changes, the number of different folders among them, and the limit.
 
 ## [0.1.0] - 2026-10-10
 

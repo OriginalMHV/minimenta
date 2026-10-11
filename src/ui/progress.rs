@@ -354,6 +354,27 @@ mod tests {
         assert!(!first_scan.iter().any(|row| row.contains("cache")));
     }
 
+    /// The longest texts of the reasons, drawn at 80 columns. The text must
+    /// end the row, so nothing is clipped.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_longest_reasons_fit_the_screen_width() {
+        use crate::cache::CacheMiss;
+        use crate::fsevents::ReplayError::TimedOut;
+        for miss in [
+            CacheMiss::Replay(TimedOut(Duration::from_secs(1800))),
+            CacheMiss::OutsideRoot,
+        ] {
+            let text = miss.to_string();
+            let progress = Progress::default();
+            progress.cache_unusable.store(true, Relaxed);
+            progress.cache_reason.set(text.clone()).unwrap();
+            let rows = screen(&progress);
+            assert!(rows[4].starts_with("  Reason: "), "{}", rows[4]);
+            assert!(rows[4].ends_with(&text), "clipped: {}", rows[4]);
+        }
+    }
+
     #[test]
     fn a_scan_without_an_earlier_count_looks_as_before() {
         let progress = Progress::default();
