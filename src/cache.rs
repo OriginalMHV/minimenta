@@ -1752,6 +1752,20 @@ mod tests {
         }
 
         #[test]
+        fn a_folder_that_cannot_be_listed_again_gives_the_error() {
+            let f = fixture();
+            let gone = f.root.join("gone");
+            let changes = vec![(gone.join("a"), false)];
+            let mut dir = Dir::default();
+            let miss = apply(&mut dir, &gone, changes, &opts(), &Progress::default())
+                .expect_err("a root that is gone needs a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::ListFailed("No such file or directory (os error 2)".into())
+            );
+        }
+
+        #[test]
         fn distinct_paths_count_each_path_once_whatever_the_flag() {
             let path = |p: &str, recursive| (PathBuf::from(p), recursive);
             let changes = [
