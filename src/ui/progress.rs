@@ -6,11 +6,11 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
+use ratatui::{DefaultTerminal, Frame};
 
 use super::{display_path, view};
 use crate::cache::{self, Scan};
@@ -81,19 +81,7 @@ pub fn scan(
             start.elapsed(),
             counting_since.elapsed(),
         );
-        terminal.draw(|frame| {
-            let [header, _, body, _, footer] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(lines.len() as u16),
-                Constraint::Fill(1),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-            frame.render_widget(view::header_bar(), header);
-            frame.render_widget(Paragraph::new(lines), body);
-            frame.render_widget(view::bar(" Esc cancel   q quit"), footer);
-        })?;
+        terminal.draw(|frame| draw(frame, lines))?;
         while event::poll(Duration::ZERO)? {
             let Event::Key(key) = event::read()? else {
                 continue;
@@ -111,6 +99,21 @@ pub fn scan(
             }
         }
     }
+}
+
+/// Draws the progress screen. The body is as tall as its lines.
+fn draw(frame: &mut Frame, lines: Vec<Line<'static>>) {
+    let [header, _, body, _, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(lines.len() as u16),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    frame.render_widget(view::header_bar(), header);
+    frame.render_widget(Paragraph::new(lines), body);
+    frame.render_widget(view::bar(" Esc cancel   q quit"), footer);
 }
 
 /// The text of the progress screen. `counting` is the time since the
@@ -133,6 +136,9 @@ fn lines(
         lines.push(Line::from(
             "  minimenta could not use the cache and scans all folders again",
         ));
+        if let Some(reason) = progress.cache_reason.get() {
+            lines.push(Line::from(format!("  Reason: {reason}")));
+        }
     }
     let (last, note) = if checking {
         let note = match progress.check_limit_ms.load(Relaxed) {
@@ -273,6 +279,79 @@ mod tests {
         );
         assert_eq!(shown[3], "  Items:  1000   (last scan: 4000)");
         assert_eq!(shown[5], "  Time:   25.0 s   (about 30 s left)");
+    }
+
+    /// The text of an 80x24 terminal, the smallest common size. One string for
+    /// each row, without the spaces at the end.
+    fn screen(progress: &Progress) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let body = lines(
+            Path::new("/x"),
+            progress,
+            false,
+            Duration::from_secs(25),
+            Duration::from_secs(10),
+        );
+        terminal.draw(|frame| draw(frame, body)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shows_why_the_cache_was_not_used_on_its_own_line() {
+        let progress = Progress::default();
+        progress.cache_unusable.store(true, Relaxed);
+        progress
+            .cache_reason
+            .set("31204 changes in 2113 folders. The limit is 20000 changes.".to_string())
+            .unwrap();
+        progress.items.store(1000, Relaxed);
+        progress.expected_items.store(4000, Relaxed);
+        let rows = screen(&progress);
+        assert_eq!(rows[2], "  Scanning /x");
+        assert_eq!(
+            rows[3],
+            "  minimenta could not use the cache and scans all folders again"
+        );
+        assert_eq!(
+            rows[4],
+            "  Reason: 31204 changes in 2113 folders. The limit is 20000 changes."
+        );
+        assert_eq!(rows[5], "");
+        assert_eq!(rows[6], "  Items:  1000   (last scan: 4000)");
+        assert_eq!(rows[8], "  Time:   25.0 s   (about 30 s left)");
+        assert_eq!(rows[9], "", "the body is as tall as its lines");
+        assert!(rows[23].contains("Esc cancel"));
+    }
+
+    #[test]
+    fn shows_no_reason_line_when_the_scan_has_no_reason() {
+        let progress = Progress::default();
+        progress.cache_unusable.store(true, Relaxed);
+        progress.items.store(1000, Relaxed);
+        let rows = screen(&progress);
+        assert_eq!(
+            rows[3],
+            "  minimenta could not use the cache and scans all folders again"
+        );
+        assert_eq!(rows[4], "");
+        assert_eq!(rows[5], "  Items:  1000");
+        assert!(!rows.iter().any(|row| row.contains("Reason")));
+
+        let first_scan = screen(&Progress::default());
+        assert_eq!(first_scan[3], "");
+        assert!(!first_scan.iter().any(|row| row.contains("cache")));
     }
 
     #[test]
