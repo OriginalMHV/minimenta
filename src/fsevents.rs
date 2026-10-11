@@ -3,6 +3,7 @@
 //! the cache do not pay its start-up cost.
 
 use std::ffi::{CStr, OsStr, c_char, c_void};
+use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -127,11 +128,51 @@ pub struct Change {
     pub recursive: bool,
 }
 
+/// Why [`changes_since`] gave no changes. The caller must then scan everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayError {
+    /// CoreServices or one of its functions is missing.
+    Unavailable,
+    /// The stream could not be created or started.
+    StreamFailed,
+    /// The history did not end within the budget.
+    TimedOut(Duration),
+    /// The history has gaps, because events were dropped.
+    EventsDropped,
+    /// The event IDs wrapped around, so the old position means nothing.
+    IdsWrapped,
+    /// The path to the watched folder changed.
+    RootChanged,
+    /// The caller set `cancel`.
+    Cancelled,
+}
+
+impl fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("FSEvents is not available."),
+            Self::StreamFailed => f.write_str("FSEvents could not start a stream for the folder."),
+            Self::TimedOut(limit) => write!(
+                f,
+                "FSEvents did not send the changes within {:.1} s. That is the limit.",
+                limit.as_secs_f64()
+            ),
+            Self::EventsDropped => f.write_str("FSEvents dropped events, so its history has gaps."),
+            Self::IdsWrapped => f.write_str("The FSEvents event IDs wrapped around."),
+            Self::RootChanged => {
+                f.write_str("FSEvents reported a change in the path to the folder.")
+            }
+            Self::Cancelled => f.write_str("The scan was cancelled."),
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     changes: Vec<Change>,
     done: bool,
-    unusable: bool,
+    /// The first sign that the history cannot describe what happened.
+    unusable: Option<ReplayError>,
 }
 
 #[derive(Default)]
@@ -164,8 +205,8 @@ extern "C" fn on_events(
         let flags = unsafe { *flags.add(i) };
         if flags & HISTORY_DONE != 0 {
             state.done = true;
-        } else if flags & (USER_DROPPED | KERNEL_DROPPED | IDS_WRAPPED | ROOT_CHANGED) != 0 {
-            state.unusable = true;
+        } else if let Some(error) = history_loss(flags) {
+            state.unusable.get_or_insert(error);
         } else {
             let path = unsafe { CStr::from_ptr(*paths.add(i)) };
             state.changes.push(Change {
@@ -177,16 +218,32 @@ extern "C" fn on_events(
     collector.wake.notify_all();
 }
 
-/// Returns the directories below `root` that changed after event `since`, or
-/// `None` when the history cannot answer within `budget` or `cancel` is set.
-/// Then the caller must scan everything.
+/// Says if the `flags` of an event show that the history cannot describe what
+/// happened. Returns `None` for an ordinary event. An event with several of
+/// these flags gives the first in this order: dropped events, wrapped IDs,
+/// changed root.
+fn history_loss(flags: u32) -> Option<ReplayError> {
+    if flags & (USER_DROPPED | KERNEL_DROPPED) != 0 {
+        Some(ReplayError::EventsDropped)
+    } else if flags & IDS_WRAPPED != 0 {
+        Some(ReplayError::IdsWrapped)
+    } else if flags & ROOT_CHANGED != 0 {
+        Some(ReplayError::RootChanged)
+    } else {
+        None
+    }
+}
+
+/// Returns the directories below `root` that changed after event `since`.
+/// Returns the reason when the history cannot answer within `budget` or when
+/// `cancel` is set. Then the caller must scan everything.
 pub fn changes_since(
     root: &Path,
     since: u64,
     budget: Duration,
     cancel: &AtomicBool,
-) -> Option<Vec<Change>> {
-    let api = api()?;
+) -> Result<Vec<Change>, ReplayError> {
+    let api = api().ok_or(ReplayError::Unavailable)?;
     let collector = Arc::new(Collector::default());
     let root = root.as_os_str().as_bytes();
     let path = (api.string_create)(
@@ -197,7 +254,7 @@ pub fn changes_since(
         0,
     );
     if path.is_null() {
-        return None;
+        return Err(ReplayError::StreamFailed);
     }
     let paths = (api.array_create)(std::ptr::null(), &raw const path, 1, api.array_callbacks);
     (api.release_cf)(path);
@@ -219,31 +276,169 @@ pub fn changes_since(
     );
     (api.release_cf)(paths);
     if stream.is_null() {
-        return None;
+        return Err(ReplayError::StreamFailed);
     }
     let queue = unsafe { dispatch_queue_create(c"minimenta.fsevents".as_ptr(), std::ptr::null()) };
     (api.set_queue)(stream, queue);
 
-    let mut result = None;
-    if (api.start)(stream) != 0 {
-        let deadline = Instant::now() + budget;
-        let mut state = collector.state.lock().unwrap();
-        // Short waits, so Esc on the progress screen takes effect quickly.
-        while !state.done && !state.unusable && !cancel.load(Relaxed) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            let slice = left.min(Duration::from_millis(100));
-            state = collector.wake.wait_timeout(state, slice).unwrap().0;
-        }
-        if state.done && !state.unusable && !cancel.load(Relaxed) {
-            result = Some(std::mem::take(&mut state.changes));
-        }
-    }
+    let result = if (api.start)(stream) == 0 {
+        Err(ReplayError::StreamFailed)
+    } else {
+        wait_for_history(&collector, budget, cancel)
+    };
     (api.stop)(stream);
     (api.invalidate)(stream);
     (api.release_stream)(stream);
     unsafe { dispatch_release(queue) };
     result
+}
+
+/// Waits until the history ends, shows a gap, or `budget` or `cancel` stops
+/// the wait.
+fn wait_for_history(
+    collector: &Collector,
+    budget: Duration,
+    cancel: &AtomicBool,
+) -> Result<Vec<Change>, ReplayError> {
+    let deadline = Instant::now() + budget;
+    let mut state = collector.state.lock().unwrap();
+    // Short waits, so Esc on the progress screen takes effect quickly.
+    while !state.done && state.unusable.is_none() && !cancel.load(Relaxed) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let slice = left.min(Duration::from_millis(100));
+        state = collector.wake.wait_timeout(state, slice).unwrap().0;
+    }
+    if cancel.load(Relaxed) {
+        Err(ReplayError::Cancelled)
+    } else if let Some(error) = state.unusable {
+        Err(error)
+    } else if state.done {
+        Ok(std::mem::take(&mut state.changes))
+    } else {
+        Err(ReplayError::TimedOut(budget))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hands the callback the same data that FSEvents hands it.
+    fn deliver(collector: &Arc<Collector>, events: &[(&CStr, u32)]) {
+        let paths: Vec<*const c_char> = events.iter().map(|(path, _)| path.as_ptr()).collect();
+        let flags: Vec<u32> = events.iter().map(|(_, flags)| *flags).collect();
+        on_events(
+            std::ptr::null(),
+            Arc::as_ptr(collector).cast_mut().cast(),
+            events.len(),
+            paths.as_ptr().cast_mut().cast(),
+            flags.as_ptr(),
+            std::ptr::null(),
+        );
+    }
+
+    fn wait(collector: &Collector, budget: Duration) -> Result<Vec<Change>, ReplayError> {
+        wait_for_history(collector, budget, &AtomicBool::new(false))
+    }
+
+    #[test]
+    fn each_flag_of_a_lost_history_has_its_own_reason() {
+        assert_eq!(history_loss(USER_DROPPED), Some(ReplayError::EventsDropped));
+        assert_eq!(
+            history_loss(MUST_SCAN_SUBDIRS | KERNEL_DROPPED),
+            Some(ReplayError::EventsDropped)
+        );
+        assert_eq!(history_loss(IDS_WRAPPED), Some(ReplayError::IdsWrapped));
+        assert_eq!(history_loss(ROOT_CHANGED), Some(ReplayError::RootChanged));
+        assert_eq!(
+            history_loss(IDS_WRAPPED | ROOT_CHANGED),
+            Some(ReplayError::IdsWrapped)
+        );
+        assert_eq!(
+            history_loss(ROOT_CHANGED | USER_DROPPED),
+            Some(ReplayError::EventsDropped)
+        );
+    }
+
+    #[test]
+    fn ordinary_events_do_not_lose_the_history() {
+        for flags in [
+            0,
+            MUST_SCAN_SUBDIRS,
+            MOUNT,
+            UNMOUNT,
+            MUST_SCAN_SUBDIRS | MOUNT,
+        ] {
+            assert_eq!(history_loss(flags), None, "flags {flags:#x}");
+        }
+    }
+
+    #[test]
+    fn a_finished_history_gives_its_changes() {
+        let collector = Arc::new(Collector::default());
+        deliver(
+            &collector,
+            &[
+                (c"/r/a", MUST_SCAN_SUBDIRS),
+                (c"/r/b", 0),
+                (c"", HISTORY_DONE),
+            ],
+        );
+        assert_eq!(
+            wait(&collector, Duration::ZERO),
+            Ok(vec![
+                Change {
+                    path: PathBuf::from("/r/a"),
+                    recursive: true
+                },
+                Change {
+                    path: PathBuf::from("/r/b"),
+                    recursive: false
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn the_first_gap_in_the_history_is_the_reason_even_when_it_ends() {
+        let collector = Arc::new(Collector::default());
+        deliver(
+            &collector,
+            &[
+                (c"/r/a", MUST_SCAN_SUBDIRS),
+                (c"/r/b", MUST_SCAN_SUBDIRS | USER_DROPPED),
+                (c"/r", IDS_WRAPPED),
+                (c"", HISTORY_DONE),
+            ],
+        );
+        assert_eq!(
+            wait(&collector, Duration::ZERO),
+            Err(ReplayError::EventsDropped)
+        );
+    }
+
+    #[test]
+    fn a_history_that_does_not_end_in_time_names_the_budget() {
+        let budget = Duration::from_millis(30);
+        let started = Instant::now();
+        assert_eq!(
+            wait(&Collector::default(), budget),
+            Err(ReplayError::TimedOut(budget))
+        );
+        assert!(started.elapsed() >= budget, "gave up before the budget");
+    }
+
+    #[test]
+    fn a_cancel_beats_every_other_outcome() {
+        let collector = Arc::new(Collector::default());
+        deliver(&collector, &[(c"/r", ROOT_CHANGED), (c"", HISTORY_DONE)]);
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_history(&collector, Duration::from_secs(5), &cancel),
+            Err(ReplayError::Cancelled)
+        );
+    }
 }

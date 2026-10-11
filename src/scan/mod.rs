@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Component, Path};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::{Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -147,6 +147,10 @@ pub struct Progress {
     /// Set when the check could not use the cache and the scan lists every
     /// folder again (macOS).
     pub cache_unusable: AtomicBool,
+    /// Why the check could not use the cache, as one line of text (macOS).
+    /// The scan sets it before `cache_unusable`. A missing cache file has no
+    /// reason, and neither has a cancelled scan.
+    pub cache_reason: OnceLock<String>,
     /// The item count of an earlier scan of the same folder, or 0 when there
     /// is none. The progress screen estimates the time left from it.
     pub expected_items: AtomicU64,

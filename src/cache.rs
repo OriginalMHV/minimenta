@@ -59,6 +59,104 @@ const MAX_AGE_SECS: u64 = 7 * 24 * 3600;
 #[cfg(target_os = "macos")]
 const RESAVE_SECS: u64 = 3600;
 
+/// Why the check could not use the cache. The progress screen shows the text
+/// of [`Display`](std::fmt::Display) under its message. Each text says what the
+/// check compared, so the reader can tell which limit it hit.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq)]
+pub enum CacheMiss {
+    /// There is no cache file. This is a first scan, so the screen says nothing.
+    NoFile,
+    /// The last full scan is older than `MAX_AGE_SECS`.
+    Expired,
+    /// The cache was made for another root path or with another `-x` setting.
+    OtherOptions,
+    /// The root has another device or inode than at the last scan.
+    FolderReplaced,
+    FolderUnreadable,
+    /// FSEvents gives no ID for the volume of the root.
+    VolumeUnknown,
+    VolumeChanged,
+    /// The cache file cannot be read. Holds the error text.
+    FileUnreadable(String),
+    /// The magic bytes, the version, or the data do not match.
+    FileDamaged,
+    /// FSEvents cannot give the history of the root.
+    Replay(crate::fsevents::ReplayError),
+    /// The history names a path outside the root.
+    OutsideRoot,
+    /// The first pass found more than `MAX_CHANGES` entries. `changes` counts
+    /// the entries that the check compared, `folders` the different paths
+    /// among them.
+    TooManyChanges {
+        changes: usize,
+        folders: usize,
+        limit: usize,
+    },
+    /// The second pass found more than `MAX_CHANGES` folders with hard links.
+    TooManyLinkedFolders {
+        count: usize,
+        limit: usize,
+    },
+    /// A folder could not be listed again. Holds the error text.
+    ListFailed(String),
+}
+
+#[cfg(target_os = "macos")]
+impl CacheMiss {
+    /// A missing cache file is the normal case on the first scan of a folder.
+    pub fn is_silent(&self) -> bool {
+        matches!(self, Self::NoFile)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Display for CacheMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoFile => f.write_str("There is no cache file."),
+            Self::Expired => write!(
+                f,
+                "The last full scan is more than {} days old.",
+                MAX_AGE_SECS / (24 * 3600)
+            ),
+            Self::OtherOptions => {
+                f.write_str("The cache is from a scan with other options or another path.")
+            }
+            Self::FolderReplaced => f.write_str("The folder was replaced since the last scan."),
+            Self::FolderUnreadable => f.write_str("The folder cannot be read."),
+            Self::VolumeUnknown => {
+                f.write_str("FSEvents cannot identify the volume of the folder.")
+            }
+            Self::VolumeChanged => {
+                f.write_str("The volume of the folder changed since the last scan.")
+            }
+            Self::FileUnreadable(error) => write!(f, "The cache file cannot be read: {error}"),
+            Self::FileDamaged => {
+                f.write_str("The cache file is damaged or has another format version.")
+            }
+            Self::Replay(error) => write!(f, "{error}"),
+            Self::OutsideRoot => {
+                f.write_str("FSEvents named a path outside the folder. The folder may have moved.")
+            }
+            Self::TooManyChanges {
+                changes,
+                folders,
+                limit,
+            } => write!(
+                f,
+                "{changes} changes in {folders} folder{}. The limit is {limit} changes.",
+                if *folders == 1 { "" } else { "s" }
+            ),
+            Self::TooManyLinkedFolders { count, limit } => write!(
+                f,
+                "{count} folders have hard links. The limit is {limit} folders."
+            ),
+            Self::ListFailed(error) => write!(f, "A folder could not be listed again: {error}"),
+        }
+    }
+}
+
 /// Scans `path`, or loads the cached tree and lists again only the directories
 /// that changed since. Saves the result for the next run.
 pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan> {
@@ -68,18 +166,22 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
     let use_cache = opts.cache && cache_allowed();
     #[cfg(target_os = "macos")]
     if use_cache {
-        if let Some(result) = incremental(&root, opts, progress, began) {
-            return result;
-        }
-        // The check can list folders before it stops, and the full scan
-        // counts them again. The flag goes last, so the screen never shows
-        // the old counts as part of the full scan.
-        if progress.checking_cache.load(Ordering::Relaxed) {
-            progress.items.store(0, Ordering::Relaxed);
-            progress.disk.store(0, Ordering::Relaxed);
-            progress.errors.store(0, Ordering::Relaxed);
-            progress.cache_unusable.store(true, Ordering::Relaxed);
-            progress.checking_cache.store(false, Ordering::Release);
+        match incremental(&root, opts, progress, began) {
+            Ok(result) => return result,
+            Err(miss) if miss.is_silent() => {}
+            Err(miss) => {
+                // The check can list folders before it stops, and the full
+                // scan counts them again. The flag goes last, so the screen
+                // never shows the old counts as part of the full scan. The
+                // reason comes before `cache_unusable`, so the screen finds it
+                // when it shows the message.
+                progress.items.store(0, Ordering::Relaxed);
+                progress.disk.store(0, Ordering::Relaxed);
+                progress.errors.store(0, Ordering::Relaxed);
+                let _ = progress.cache_reason.set(miss.to_string());
+                progress.cache_unusable.store(true, Ordering::Relaxed);
+                progress.checking_cache.store(false, Ordering::Release);
+            }
         }
     }
     let event_id = if use_cache { current_event_id() } else { None };
@@ -113,51 +215,36 @@ pub fn scan(path: &Path, opts: &Options, progress: &Progress) -> io::Result<Scan
 }
 
 /// `began` is when the scan began. The progress screen counts its time from
-/// there.
+/// there. Returns the reason when a full scan is needed.
 #[cfg(target_os = "macos")]
 fn incremental(
     root: &Path,
     opts: &Options,
     progress: &Progress,
     began: Instant,
-) -> Option<io::Result<Scan>> {
-    use crate::fsevents;
+) -> Result<io::Result<Scan>, CacheMiss> {
+    use crate::fsevents::{self, ReplayError};
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::Duration;
 
-    let file = file_for(root)?;
-    fs::metadata(&file).ok()?;
+    let file = file_for(root).ok_or(CacheMiss::NoFile)?;
+    fs::metadata(&file).map_err(|_| CacheMiss::NoFile)?;
     // A large cache file takes a moment to read, so the screen says so first.
     progress.checking_cache.store(true, Relaxed);
-    let bytes = std::sync::Arc::new(fs::read(&file).ok()?);
-    let (header, start) = decode_header(&bytes)?;
+    let bytes =
+        std::sync::Arc::new(fs::read(&file).map_err(|e| CacheMiss::FileUnreadable(e.to_string()))?);
+    let (header, start) = decode_header(&bytes).ok_or(CacheMiss::FileDamaged)?;
     // Decoding a large tree takes about as long as the checks and the
     // FSEvents replay below, so both run at the same time if a thread starts.
     let shared = std::sync::Arc::clone(&bytes);
     let decoder = std::thread::Builder::new()
         .spawn(move || decode_tree(&shared[start..]))
         .ok();
-    let (dev, ino) = identity(root)?;
-    let same_tree = header.root == root
-        && header.one_fs == opts.one_fs
-        && (header.root_dev, header.root_ino) == (dev, ino);
-    // The count of the same tree helps the estimate of a full scan, also when
-    // the cache is too old to use.
-    if same_tree {
-        progress.expected_items.store(header.items, Relaxed);
-    }
-    // FSEvents reports nothing for a root that can no longer be read, so check
-    // it directly. The full scan then reports the error.
-    let usable = same_tree
-        && fs::read_dir(root).is_ok()
-        && volume_of(root)? == header.volume
-        && now().saturating_sub(header.full_scan_at) <= MAX_AGE_SECS;
-    if !usable {
-        return None;
-    }
+    check_header(&header, root, opts, progress)?;
     // Taken before the replay: anything that happens from now on is replayed
     // next time. Listing a directory twice is harmless.
-    let event_id = fsevents::current_event_id()?;
+    let event_id =
+        fsevents::current_event_id().ok_or(CacheMiss::Replay(ReplayError::Unavailable))?;
     let budget = Duration::from_secs_f64((header.scan_secs / 2.0).max(0.5));
     let mounts = mounts_under(root);
 
@@ -178,21 +265,23 @@ fn incremental(
     progress.check_limit_ms.store(deadline, Relaxed);
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
     for stream in &streams {
-        let Some(events) =
-            fsevents::changes_since(stream, header.event_id, budget, &progress.cancel)
-        else {
-            if progress.cancel.load(Relaxed) {
-                return Some(Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "scan cancelled",
-                )));
-            }
-            if stream == root {
-                return None;
-            }
-            changes.push((stream.clone(), true));
-            continue;
-        };
+        let events =
+            match fsevents::changes_since(stream, header.event_id, budget, &progress.cancel) {
+                Ok(events) => events,
+                Err(error) => {
+                    if progress.cancel.load(Relaxed) {
+                        return Ok(Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "scan cancelled",
+                        )));
+                    }
+                    if stream == root {
+                        return Err(CacheMiss::Replay(error));
+                    }
+                    changes.push((stream.clone(), true));
+                    continue;
+                }
+            };
         for event in events {
             let inside: Vec<PathBuf> = aliases(&event.path)
                 .into_iter()
@@ -202,25 +291,23 @@ fn incremental(
             // root was renamed away and back, means the replay cannot describe
             // what happened.
             if inside.is_empty() {
-                return None;
+                return Err(CacheMiss::OutsideRoot);
             }
             changes.extend(inside.into_iter().map(|p| (p, event.recursive)));
         }
     }
     progress.check_limit_ms.store(0, Relaxed);
     changes.extend(mount_changes(&header.mounts, &mounts, opts.one_fs));
-    let mut reported: Vec<&PathBuf> = changes.iter().map(|(p, _)| p).collect();
-    reported.sort();
-    reported.dedup();
-    let listed = reported.len();
+    let listed = distinct_paths(&changes);
 
     let mut dir = match decoder {
-        Some(thread) => thread.join().ok()??,
-        None => decode_tree(&bytes[start..])?,
-    };
+        Some(thread) => thread.join().ok().flatten(),
+        None => decode_tree(&bytes[start..]),
+    }
+    .ok_or(CacheMiss::FileDamaged)?;
     let before = (dir.totals(), error_count(&dir));
     if let Err(e) = apply(&mut dir, root, changes, opts, progress)? {
-        return Some(Err(e));
+        return Ok(Err(e));
     }
     let changed = listed > 0 || (dir.totals(), error_count(&dir)) != before;
     let stale_file = now().saturating_sub(header.saved_at) > RESAVE_SECS;
@@ -237,15 +324,68 @@ fn incremental(
     if changed || stale_file {
         save_in_background(&session, &dir);
     }
-    Some(Ok(Scan {
+    Ok(Ok(Scan {
         dir,
         source: Source::Cached { listed, age_secs },
         session: Some(session),
     }))
 }
 
+/// Checks that the cache is for this folder and these options, that the
+/// folder and its volume are the same, and that the last full scan is recent.
+/// Checks in that order, and returns the first reason that fails.
+#[cfg(target_os = "macos")]
+fn check_header(
+    header: &Header,
+    root: &Path,
+    opts: &Options,
+    progress: &Progress,
+) -> Result<(), CacheMiss> {
+    let (dev, ino) = identity(root).ok_or(CacheMiss::FolderUnreadable)?;
+    let same_options = header.root == root && header.one_fs == opts.one_fs;
+    let same_folder = (header.root_dev, header.root_ino) == (dev, ino);
+    // The count of the same tree helps the estimate of a full scan, also when
+    // the cache is too old to use.
+    if same_options && same_folder {
+        progress
+            .expected_items
+            .store(header.items, std::sync::atomic::Ordering::Relaxed);
+    }
+    if !same_options {
+        return Err(CacheMiss::OtherOptions);
+    }
+    if !same_folder {
+        return Err(CacheMiss::FolderReplaced);
+    }
+    // FSEvents reports nothing for a root that can no longer be read, so check
+    // it directly. The full scan then reports the error.
+    if fs::read_dir(root).is_err() {
+        return Err(CacheMiss::FolderUnreadable);
+    }
+    match volume_of(root) {
+        None => return Err(CacheMiss::VolumeUnknown),
+        Some(volume) if volume != header.volume => return Err(CacheMiss::VolumeChanged),
+        Some(_) => {}
+    }
+    if now().saturating_sub(header.full_scan_at) > MAX_AGE_SECS {
+        return Err(CacheMiss::Expired);
+    }
+    Ok(())
+}
+
+/// The number of different paths in `changes`. It compares the paths as they
+/// are and ignores the flags.
+#[cfg(target_os = "macos")]
+fn distinct_paths(changes: &[(PathBuf, bool)]) -> usize {
+    let mut paths: Vec<&PathBuf> = changes.iter().map(|(p, _)| p).collect();
+    paths.sort();
+    paths.dedup();
+    paths.len()
+}
+
 /// Lists the changed folders again, and the folders that FSEvents cannot
-/// report on. Returns `None` when a full scan is simpler or needed.
+/// report on. Returns the reason when a full scan is simpler or needed.
+/// A cancelled listing is the inner error.
 #[cfg(target_os = "macos")]
 fn apply(
     dir: &mut Dir,
@@ -253,18 +393,22 @@ fn apply(
     mut changes: Vec<(PathBuf, bool)>,
     opts: &Options,
     progress: &Progress,
-) -> Option<io::Result<()>> {
+) -> Result<io::Result<()>, CacheMiss> {
     let mut linked = Vec::new();
     refresh_dirs(dir, root, &mut changes, &mut linked);
     if changes.len() > MAX_CHANGES {
-        return None;
+        return Err(CacheMiss::TooManyChanges {
+            changes: changes.len(),
+            folders: distinct_paths(&changes),
+            limit: MAX_CHANGES,
+        });
     }
     let found_links = match list_again(dir, root, &changes, opts, progress) {
         Ok(found) => found,
-        Err(e) => return (e.kind() == io::ErrorKind::Interrupted).then_some(Err(e)),
+        Err(e) => return listing_stopped(e),
     };
     if changes.is_empty() {
-        return Some(Ok(()));
+        return Ok(Ok(()));
     }
     // Every link of a file must be found again in one pass, so it counts
     // once. That pass is needed when the listing found hard links, or when a
@@ -276,14 +420,27 @@ fn apply(
     now_linked.sort();
     if found_links || now_linked != linked {
         if now_linked.len() > MAX_CHANGES {
-            return None;
+            return Err(CacheMiss::TooManyLinkedFolders {
+                count: now_linked.len(),
+                limit: MAX_CHANGES,
+            });
         }
         let all: Vec<_> = now_linked.into_iter().map(|p| (p, false)).collect();
         if let Err(e) = list_again(dir, root, &all, opts, progress) {
-            return (e.kind() == io::ErrorKind::Interrupted).then_some(Err(e));
+            return listing_stopped(e);
         }
     }
-    Some(Ok(()))
+    Ok(Ok(()))
+}
+
+/// A cancelled listing ends the scan. Any other error needs a full scan.
+#[cfg(target_os = "macos")]
+fn listing_stopped(e: io::Error) -> Result<io::Result<()>, CacheMiss> {
+    if e.kind() == io::ErrorKind::Interrupted {
+        Ok(Err(e))
+    } else {
+        Err(CacheMiss::ListFailed(e.to_string()))
+    }
 }
 
 /// Adds the directories that FSEvents cannot report on to `out`:
@@ -1088,6 +1245,148 @@ mod tests {
         assert_ne!(file_for(Path::new("/a")), file_for(Path::new("/b")));
     }
 
+    /// The progress screen shows `Reason: ` and the text on one line of an
+    /// 80-column terminal. The tests of the progress screen draw the longest
+    /// texts, so they check the real prefix.
+    #[cfg(target_os = "macos")]
+    fn assert_text(cases: impl IntoIterator<Item = (CacheMiss, &'static str)>) {
+        for (miss, text) in cases {
+            assert_eq!(miss.to_string(), text);
+            let line = format!("  Reason: {text}");
+            assert!(
+                line.chars().count() <= 80,
+                "does not fit 80 columns: {line}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reasons_about_the_cache_and_the_folder_say_what_is_wrong() {
+        assert_text([
+            (CacheMiss::NoFile, "There is no cache file."),
+            (
+                CacheMiss::Expired,
+                "The last full scan is more than 7 days old.",
+            ),
+            (
+                CacheMiss::OtherOptions,
+                "The cache is from a scan with other options or another path.",
+            ),
+            (
+                CacheMiss::FolderReplaced,
+                "The folder was replaced since the last scan.",
+            ),
+            (CacheMiss::FolderUnreadable, "The folder cannot be read."),
+            (
+                CacheMiss::VolumeUnknown,
+                "FSEvents cannot identify the volume of the folder.",
+            ),
+            (
+                CacheMiss::VolumeChanged,
+                "The volume of the folder changed since the last scan.",
+            ),
+            (
+                CacheMiss::FileUnreadable("Permission denied (os error 13)".into()),
+                "The cache file cannot be read: Permission denied (os error 13)",
+            ),
+            (
+                CacheMiss::FileDamaged,
+                "The cache file is damaged or has another format version.",
+            ),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reasons_about_fsevents_name_the_limit_or_the_gap() {
+        use crate::fsevents::ReplayError::{
+            EventsDropped, IdsWrapped, RootChanged, StreamFailed, TimedOut, Unavailable,
+        };
+        use std::time::Duration;
+        assert_text([
+            (CacheMiss::Replay(Unavailable), "FSEvents is not available."),
+            (
+                CacheMiss::Replay(StreamFailed),
+                "FSEvents could not start a stream for the folder.",
+            ),
+            (
+                CacheMiss::Replay(TimedOut(Duration::from_millis(39_480))),
+                "FSEvents did not send the changes within 39.5 s. That is the limit.",
+            ),
+            (
+                CacheMiss::Replay(TimedOut(Duration::from_secs(1800))),
+                "FSEvents did not send the changes within 1800.0 s. That is the limit.",
+            ),
+            (
+                CacheMiss::Replay(EventsDropped),
+                "FSEvents dropped events, so its history has gaps.",
+            ),
+            (
+                CacheMiss::Replay(IdsWrapped),
+                "The FSEvents event IDs wrapped around.",
+            ),
+            (
+                CacheMiss::Replay(RootChanged),
+                "FSEvents reported a change in the path to the folder.",
+            ),
+            (
+                CacheMiss::OutsideRoot,
+                "FSEvents named a path outside the folder. The folder may have moved.",
+            ),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reasons_about_the_limits_name_the_counts_that_the_check_compared() {
+        let too_many = |changes, folders| CacheMiss::TooManyChanges {
+            changes,
+            folders,
+            limit: 20_000,
+        };
+        assert_text([
+            (
+                too_many(31_204, 2_113),
+                "31204 changes in 2113 folders. The limit is 20000 changes.",
+            ),
+            (
+                too_many(1_234_567, 123_456),
+                "1234567 changes in 123456 folders. The limit is 20000 changes.",
+            ),
+            (
+                too_many(20_001, 1),
+                "20001 changes in 1 folder. The limit is 20000 changes.",
+            ),
+            (
+                CacheMiss::TooManyLinkedFolders {
+                    count: 25_000,
+                    limit: 20_000,
+                },
+                "25000 folders have hard links. The limit is 20000 folders.",
+            ),
+            (
+                CacheMiss::ListFailed("Permission denied (os error 13)".into()),
+                "A folder could not be listed again: Permission denied (os error 13)",
+            ),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_missing_cache_file_gives_no_message() {
+        use crate::fsevents::ReplayError;
+        assert!(CacheMiss::NoFile.is_silent());
+        for miss in [
+            CacheMiss::Expired,
+            CacheMiss::FileDamaged,
+            CacheMiss::Replay(ReplayError::Cancelled),
+            CacheMiss::ListFailed(String::new()),
+        ] {
+            assert!(!miss.is_silent(), "{miss:?}");
+        }
+    }
+
     /// Each test reproduces a case where an earlier version showed different
     /// data from the cache than a fresh scan.
     #[cfg(target_os = "macos")]
@@ -1148,7 +1447,7 @@ mod tests {
             while Instant::now() < deadline {
                 let seen =
                     crate::fsevents::changes_since(root, since, Duration::from_secs(2), &never);
-                if seen.is_some_and(|c| !c.is_empty()) {
+                if seen.is_ok_and(|c| !c.is_empty()) {
                     std::thread::sleep(Duration::from_millis(300));
                     return;
                 }
@@ -1159,6 +1458,11 @@ mod tests {
         /// Scans fully to write the cache, applies `change`, then compares a
         /// run that may use the cache with a fresh full scan.
         fn check(root: &Path, change: impl FnOnce()) -> Source {
+            check_with_reason(root, change).0
+        }
+
+        /// Like [`check`], and also returns why the run could not use the cache.
+        fn check_with_reason(root: &Path, change: impl FnOnce()) -> (Source, Option<String>) {
             // Setup events can get IDs after the cache position. Let them settle
             // first, or the replay sees the root being created.
             std::thread::sleep(Duration::from_millis(1500));
@@ -1169,12 +1473,13 @@ mod tests {
             let (header, _) = load(root).expect("the first scan writes the cache");
             change();
             settle(root, header.event_id);
-            let cached = scan(root, &opts(), &Progress::default()).unwrap();
+            let progress = Progress::default();
+            let cached = scan(root, &opts(), &progress).unwrap();
             flush();
             let fresh = crate::scan::scan(root, &opts(), &Progress::default()).unwrap();
             assert_eq!(describe(&cached.dir), describe(&fresh));
             assert_eq!(cached.dir.totals(), fresh.totals());
-            cached.source
+            (cached.source, progress.cache_reason.get().cloned())
         }
 
         #[test]
@@ -1237,6 +1542,30 @@ mod tests {
             );
         }
 
+        /// The volume ID comes from FSEvents. A cache of a volume with another
+        /// ID has event numbers that mean nothing now.
+        #[test]
+        fn a_cache_of_another_volume_gives_a_reason() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            write(&f.root, "a.bin", 1000);
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let (mut header, dir) = load(&f.root).unwrap();
+            header.volume[0] ^= 1;
+            save_in_background(&header, &dir);
+            flush();
+            let progress = Progress::default();
+            let run = scan(&f.root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The volume of the folder changed since the last scan.")
+            );
+        }
+
         /// The scan marks that the cache could not be used, and the full scan
         /// counts from 0 again. The item count of the cached scan
         /// stays for the estimate of the time left.
@@ -1253,6 +1582,7 @@ mod tests {
                 !first.cache_unusable.load(Relaxed),
                 "there was no cache yet"
             );
+            assert_eq!(first.cache_reason.get(), None, "there was no cache yet");
             let (mut header, dir) = load(&f.root).unwrap();
             header.full_scan_at -= MAX_AGE_SECS + 1;
             save_in_background(&header, &dir);
@@ -1266,6 +1596,10 @@ mod tests {
             assert!(matches!(run.source, Source::Scanned));
             assert!(!progress.checking_cache.load(Relaxed));
             assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The last full scan is more than 7 days old.")
+            );
             assert_eq!(progress.items.load(Relaxed), run.dir.totals().items);
             assert_eq!(progress.errors.load(Relaxed), 0);
             assert_eq!(progress.expected_items.load(Relaxed), before);
@@ -1288,6 +1622,10 @@ mod tests {
             flush();
             assert!(matches!(run.source, Source::Scanned));
             assert!(progress.cache_unusable.load(Relaxed));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The cache is from a scan with other options or another path.")
+            );
             assert_eq!(progress.expected_items.load(Relaxed), 0);
         }
 
@@ -1316,12 +1654,261 @@ mod tests {
             let f = fixture();
             write(&f.root, "a.bin", 1000);
             let away = f.tmp.path().join("away");
-            let source = check(&f.root, || {
+            let (source, reason) = check_with_reason(&f.root, || {
                 fs::rename(&f.root, &away).unwrap();
                 write(&away, "b.bin", 70_000);
                 fs::rename(&away, &f.root).unwrap();
             });
             assert!(matches!(source, Source::Scanned));
+            let reason = reason.expect("a full scan after a failed check has a reason");
+            assert!(
+                [
+                    "FSEvents named a path outside the folder. The folder may have moved.",
+                    "FSEvents reported a change in the path to the folder.",
+                ]
+                .contains(&reason.as_str()),
+                "unexpected reason: {reason}"
+            );
+        }
+
+        /// Writes the cache of `root`, then lets `damage` change the file.
+        fn cache_then(root: &Path, damage: impl FnOnce(&Path)) -> Progress {
+            write(root, "a/b.bin", 1000);
+            scan(root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let file = file_for(root).unwrap();
+            damage(&file);
+            let progress = Progress::default();
+            let run = scan(root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            progress
+        }
+
+        #[test]
+        fn a_damaged_cache_file_gives_a_reason() {
+            let f = fixture();
+            let progress = cache_then(&f.root, |file| fs::write(file, b"not a cache").unwrap());
+            assert!(
+                progress
+                    .cache_unusable
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The cache file is damaged or has another format version.")
+            );
+        }
+
+        #[test]
+        fn a_cache_file_that_cannot_be_read_gives_the_error() {
+            let f = fixture();
+            let progress = cache_then(&f.root, |file| {
+                fs::set_permissions(file, fs::Permissions::from_mode(0o000)).unwrap();
+            });
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The cache file cannot be read: Permission denied (os error 13)")
+            );
+        }
+
+        /// The header is good, so the checks and the replay pass. Only the
+        /// decoder of the tree finds the damage.
+        #[test]
+        fn a_cache_file_with_a_damaged_tree_gives_a_reason() {
+            let f = fixture();
+            write(&f.root, "a/b.bin", 1000);
+            // Let the setup events get IDs before the cache position, so the
+            // replay sees no event at all.
+            std::thread::sleep(Duration::from_millis(1500));
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let file = file_for(&f.root).unwrap();
+            let bytes = fs::read(&file).unwrap();
+            let (_, tree_start) = decode_header(&bytes).unwrap();
+            fs::write(&file, &bytes[..tree_start + 3]).unwrap();
+            let progress = Progress::default();
+            let run = scan(&f.root, &opts(), &progress).unwrap();
+            flush();
+            assert!(matches!(run.source, Source::Scanned));
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The cache file is damaged or has another format version.")
+            );
+        }
+
+        /// The user cancels while the check replays the history. The scan stops,
+        /// so the screen has no message and no reason.
+        #[test]
+        fn a_cancelled_check_gives_no_reason() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            write(&f.root, "a/b.bin", 1000);
+            scan(&f.root, &opts(), &Progress::default()).unwrap();
+            flush();
+            let progress = Progress::default();
+            progress.cancel.store(true, Relaxed);
+            let error = scan(&f.root, &opts(), &progress)
+                .err()
+                .expect("a cancelled scan fails");
+            flush();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert!(!progress.cache_unusable.load(Relaxed));
+            assert_eq!(progress.cache_reason.get(), None);
+        }
+
+        /// Entries that the first pass compared: many events for a few folders,
+        /// and the folder that the tree remembers as failed.
+        #[test]
+        fn too_many_changes_for_few_folders_give_both_counts_and_list_nothing() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let f = fixture();
+            let (_, mut dir) = sample();
+            dir.push(b"broken.bin", Kind::File, 0, 0, flag::ERROR);
+            let before = describe(&dir);
+            let raw = MAX_CHANGES + 5_000;
+            let changes: Vec<(PathBuf, bool)> = (0..raw)
+                .map(|i| (f.root.join(format!("d{}", i % 3)), i % 2 == 0))
+                .collect();
+            let progress = Progress::default();
+            let miss = apply(&mut dir, &f.root, changes, &opts(), &progress)
+                .expect_err("more changes than the limit need a full scan");
+            // The failed file adds the root as a fourth path and a 25,001st entry.
+            assert_eq!(
+                miss,
+                CacheMiss::TooManyChanges {
+                    changes: raw + 1,
+                    folders: 4,
+                    limit: MAX_CHANGES
+                }
+            );
+            assert_eq!(
+                miss.to_string(),
+                "25001 changes in 4 folders. The limit is 20000 changes."
+            );
+            assert_eq!(progress.items.load(Relaxed), 0, "listed a folder");
+            assert_eq!(describe(&dir), before);
+        }
+
+        #[test]
+        fn as_many_changes_as_the_limit_are_still_listed_again() {
+            let f = fixture();
+            let changes: Vec<(PathBuf, bool)> = (0..MAX_CHANGES)
+                .map(|i| (f.root.join(format!("missing/{}", i % 3)), false))
+                .collect();
+            let mut dir = Dir::default();
+            let result = apply(&mut dir, &f.root, changes, &opts(), &Progress::default());
+            assert!(matches!(result, Ok(Ok(()))), "{result:?}");
+        }
+
+        #[test]
+        fn a_folder_that_cannot_be_listed_again_gives_the_error() {
+            let f = fixture();
+            let gone = f.root.join("gone");
+            let changes = vec![(gone.join("a"), false)];
+            let mut dir = Dir::default();
+            let miss = apply(&mut dir, &gone, changes, &opts(), &Progress::default())
+                .expect_err("a root that is gone needs a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::ListFailed("No such file or directory (os error 2)".into())
+            );
+        }
+
+        /// The user presses Esc while the check lists the changed folders again.
+        /// The cancel is an error of the scan and not a reason.
+        #[test]
+        fn a_cancel_while_listing_again_is_not_a_cache_miss() {
+            let f = fixture();
+            let progress = Progress::default();
+            progress
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let changes = vec![(f.root.join("a"), false)];
+            let mut dir = Dir::default();
+            let result = apply(&mut dir, &f.root, changes, &opts(), &progress);
+            assert!(
+                matches!(&result, Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted),
+                "{result:?}"
+            );
+        }
+
+        /// A change removes the links of one folder, so the check must list
+        /// every folder with links again. One folder more than the limit has links.
+        #[test]
+        fn more_folders_with_links_than_the_limit_give_the_count_and_the_limit() {
+            let f = fixture();
+            let mut dir = Dir::default();
+            for i in 0..=MAX_CHANGES + 1 {
+                let mut sub = Dir::default();
+                sub.push(b"f", Kind::File, 0, 1, flag::MULTI_LINK);
+                dir.push(format!("d{i}").as_bytes(), Kind::Dir, 0, 0, 0);
+                dir.attach(i, sub, 0);
+            }
+            // The folder is not on disk, so listing it again gives an error
+            // and the tree no longer counts its links.
+            let changes = vec![(f.root.join("d0"), true)];
+            let miss = apply(&mut dir, &f.root, changes, &opts(), &Progress::default())
+                .expect_err("more folders with links than the limit need a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::TooManyLinkedFolders {
+                    count: MAX_CHANGES + 1,
+                    limit: MAX_CHANGES
+                }
+            );
+            assert_eq!(
+                miss.to_string(),
+                "20001 folders have hard links. The limit is 20000 folders."
+            );
+        }
+
+        /// Listing `a` again fails only for `a`, which the tree then marks. The
+        /// second pass lists the folders with links, and the root is one of
+        /// them. The first run has no link in the root, so it needs no second
+        /// listing of the root and passes. This shows that the error of the
+        /// second run comes from the second pass.
+        #[test]
+        fn a_second_listing_that_fails_gives_the_error() {
+            let f = fixture();
+            let tree = |link_in_root: bool| {
+                let mut sub = Dir::default();
+                sub.push(b"f", Kind::File, 0, 1, flag::MULTI_LINK);
+                let mut dir = Dir::default();
+                dir.push(b"a", Kind::Dir, 0, 0, 0);
+                dir.attach(0, sub, 0);
+                if link_in_root {
+                    dir.push(b"g", Kind::File, 0, 1, flag::MULTI_LINK);
+                }
+                dir
+            };
+            let changes = || vec![(f.root.join("a"), false)];
+            fs::set_permissions(&f.root, fs::Permissions::from_mode(0o000)).unwrap();
+
+            let mut dir = tree(false);
+            let first = apply(&mut dir, &f.root, changes(), &opts(), &Progress::default());
+            assert!(matches!(first, Ok(Ok(()))), "{first:?}");
+
+            let mut dir = tree(true);
+            let miss = apply(&mut dir, &f.root, changes(), &opts(), &Progress::default())
+                .expect_err("a root that cannot be listed again needs a full scan");
+            assert_eq!(
+                miss,
+                CacheMiss::ListFailed("Permission denied (os error 13)".into())
+            );
+        }
+
+        #[test]
+        fn distinct_paths_count_each_path_once_whatever_the_flag() {
+            let path = |p: &str, recursive| (PathBuf::from(p), recursive);
+            let changes = [
+                path("/r/a", false),
+                path("/r/a", true),
+                path("/r/b", false),
+                path("/r/a", false),
+            ];
+            assert_eq!(distinct_paths(&changes), 2);
+            assert_eq!(distinct_paths(&[]), 0);
         }
 
         /// pnpm stores and local git clones create hard links like this.
@@ -1453,11 +2040,15 @@ mod tests {
             write(&f.root, "src/big.bin", 100_000);
             let other = f.tmp.path().join("other");
             write(&other, "tiny.bin", 5);
-            let source = check(&f.root, || {
+            let (source, reason) = check_with_reason(&f.root, || {
                 fs::rename(&f.root, f.tmp.path().join("root.old")).unwrap();
                 fs::rename(&other, &f.root).unwrap();
             });
             assert!(matches!(source, Source::Scanned));
+            assert_eq!(
+                reason.as_deref(),
+                Some("The folder was replaced since the last scan.")
+            );
         }
 
         #[test]
@@ -1513,10 +2104,15 @@ mod tests {
             write(&f.root, "new.bin", 10);
             settle(&f.root, header.event_id);
             fs::set_permissions(&f.root, fs::Permissions::from_mode(0o000)).unwrap();
-            let result = scan(&f.root, &opts(), &Progress::default());
+            let progress = Progress::default();
+            let result = scan(&f.root, &opts(), &progress);
             flush();
             fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
             assert!(result.is_err(), "showed a tree for an unreadable root");
+            assert_eq!(
+                progress.cache_reason.get().map(String::as_str),
+                Some("The folder cannot be read.")
+            );
             let (_, saved) = load(&f.root).unwrap();
             assert_eq!(saved.entries.len(), 1, "saved a damaged tree");
         }
