@@ -17,6 +17,25 @@ pub struct Trashed {
     item: trash::TrashItem,
 }
 
+#[cfg(test)]
+impl Trashed {
+    /// An item that was never moved, for tests of code that only passes it on.
+    pub fn fake(original: PathBuf) -> Self {
+        Trashed {
+            #[cfg(target_os = "macos")]
+            location: original.clone(),
+            #[cfg(not(target_os = "macos"))]
+            item: trash::TrashItem {
+                id: original.clone().into_os_string(),
+                name: original.file_name().unwrap_or_default().to_os_string(),
+                original_parent: original.parent().unwrap_or(Path::new("")).to_path_buf(),
+                time_deleted: 0,
+            },
+            original,
+        }
+    }
+}
+
 /// Moves `paths` to the Trash. Returns the items that can be put back, which
 /// can be fewer than `paths` when a move failed, and the first error.
 #[cfg(not(target_os = "macos"))]
