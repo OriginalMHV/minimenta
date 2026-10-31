@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - macOS: when minimenta cannot use the cache, the progress screen gives the reason on a second line under the message. Examples are a last full scan older than 7 days, a replay that did not finish in its time limit, and more than 20,000 changes. For too many changes, the line shows the number of changes, the number of different folders among them, and the limit.
 
+### Changed
+
+- A delete (`d` or `D`) runs in the background. The rows leave the list at once, so you can keep browsing and queue more deletes. `q` waits for the running deletes, and `q` again quits at once. `Esc` stays as it was. `r` and `u` wait until the deletes end. A quick repeat of the same delete key is ignored when the question is off.
+- `D` deletes folders with 8 threads. It is about 2.5x faster on Linux, 1.5x on Windows and gains little on macOS. It never follows links or junctions, and on macOS and Linux it does not enter a folder on another device.
+
 ## [0.1.0] - 2026-10-10
 
 The Changed and Fixed lists describe changes since earlier builds from the main branch. They matter to you only if you built minimenta from source before 0.1.0.

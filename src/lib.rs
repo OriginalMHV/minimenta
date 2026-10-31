@@ -10,6 +10,7 @@
 // Loading and updating a cache needs FSEvents, so only macOS uses most of it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache;
+mod delete;
 #[cfg(target_os = "macos")]
 mod fsevents;
 mod scan;
