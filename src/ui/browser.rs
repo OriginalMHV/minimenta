@@ -1019,7 +1019,7 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
     for path in paths {
         let is_dir = path.symlink_metadata().is_ok_and(|m| m.is_dir());
         let result = if is_dir {
-            std::fs::remove_dir_all(path)
+            crate::delete::remove_tree(path)
         } else {
             std::fs::remove_file(path)
         };
@@ -1720,6 +1720,30 @@ mod tests {
         let paths = [tmp.path().join("missing"), file.clone()];
         assert_eq!(remove_all(&paths), Ok(()));
         assert!(!file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_all_removes_a_symlink_to_a_folder_as_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep"), b"x").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(remove_all(std::slice::from_ref(&link)), Ok(()));
+        assert!(link.symlink_metadata().is_err());
+        assert!(target.join("keep").exists());
+    }
+
+    #[test]
+    fn remove_all_removes_a_folder_with_its_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("file"), b"x").unwrap();
+        assert_eq!(remove_all(std::slice::from_ref(&dir)), Ok(()));
+        assert!(!dir.exists());
     }
 
     #[test]
