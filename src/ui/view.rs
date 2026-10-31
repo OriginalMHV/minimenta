@@ -193,8 +193,14 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 fn footer_line(b: &Browser, width: usize) -> Line<'static> {
-    if let Some(message) = &b.message {
-        return bar(&format!(" {message}"));
+    let status = b.status();
+    let message = if b.quitting() {
+        None
+    } else {
+        b.message.as_ref()
+    };
+    if let Some(text) = message.or(status.as_ref()) {
+        return bar(&format!(" {text}"));
     }
     let t = b.dir().totals();
     let mut text = format!(

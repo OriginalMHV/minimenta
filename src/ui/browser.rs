@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 use std::time::Duration;
 
 use ratatui::DefaultTerminal;
@@ -28,6 +30,10 @@ struct Range {
     before: Vec<bool>,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent switch of the screen"
+)]
 pub struct Browser {
     pub tree: Tree,
     pub stack: Vec<usize>,
@@ -49,6 +55,125 @@ pub struct Browser {
     /// until quit, and the help screen turns it back on.
     pub ask_trash: bool,
     pub ask_delete: bool,
+    worker: Worker,
+    /// The deletes that the worker has not finished or that wait for `done`
+    /// to be applied, the oldest first.
+    pending: VecDeque<Pending>,
+    /// Results of the oldest pending jobs. A result that changes the tree
+    /// waits here until the screen can take it.
+    done: VecDeque<JobResult>,
+    /// A quit waits for the pending deletes.
+    quitting: bool,
+}
+
+/// How the event loop ended. A forced quit leaves the cache as it was.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Exit {
+    Normal,
+    Forced,
+}
+
+/// What a delete returns: the items that can be put back, and the first error.
+type Deleted = (Vec<trash::Trashed>, Result<(), String>);
+
+/// Moves or removes paths. Real code uses the Trash or `remove_all`, tests
+/// pass a fake.
+type Deleter = Box<dyn FnMut(&[PathBuf], bool) -> Deleted + Send>;
+
+fn real_deleter() -> Deleter {
+    Box::new(|paths, permanent| {
+        if permanent {
+            (Vec::new(), remove_all(paths))
+        } else {
+            trash::move_to_trash(paths)
+        }
+    })
+}
+
+/// A delete for the worker. It holds absolute paths, never tree indices,
+/// because the tree changes while the job runs.
+struct Job {
+    paths: Vec<PathBuf>,
+    /// Whether each path was a directory, so a survivor is scanned again.
+    dirs: Vec<bool>,
+    permanent: bool,
+}
+
+/// A taken row that is still on disk, with the fresh listing of a directory.
+type Survivor = ((Vec<u8>, Entry), Option<Dir>);
+
+enum Left {
+    Gone,
+    /// Still on disk. A directory comes with its fresh listing.
+    Present(Option<Dir>),
+}
+
+struct JobResult {
+    left: Vec<Left>,
+    trashed: Vec<trash::Trashed>,
+    result: Result<(), String>,
+}
+
+impl JobResult {
+    /// Only a path that is still on disk changes the tree.
+    fn changes_tree(&self) -> bool {
+        self.left.iter().any(|l| matches!(l, Left::Present(_)))
+    }
+}
+
+/// The UI side of a job. The taken entries leave the tree at once, and this
+/// keeps them (in the order of `paths`) for the undo step or a put-back.
+struct Pending {
+    folder: PathBuf,
+    paths: Vec<PathBuf>,
+    taken: Vec<(Vec<u8>, Entry)>,
+    permanent: bool,
+    offset: usize,
+}
+
+/// One thread runs the jobs in order, so deletes keep their order and
+/// Finder gets one request at a time.
+struct Worker {
+    jobs: Sender<Job>,
+    results: Receiver<JobResult>,
+}
+
+impl Worker {
+    fn spawn(opts: Options, mut deleter: Deleter) -> Self {
+        let (jobs, job_rx) = mpsc::channel::<Job>();
+        let (result_tx, results) = mpsc::channel();
+        thread::spawn(move || {
+            for job in job_rx {
+                if result_tx.send(run_job(&job, &opts, &mut deleter)).is_err() {
+                    break;
+                }
+            }
+        });
+        Worker { jobs, results }
+    }
+}
+
+fn run_job(job: &Job, opts: &Options, deleter: &mut Deleter) -> JobResult {
+    let (trashed, result) = deleter(&job.paths, job.permanent);
+    let left = job
+        .paths
+        .iter()
+        .zip(&job.dirs)
+        .map(|(path, &is_dir)| {
+            if path.symlink_metadata().is_err() {
+                Left::Gone
+            } else if is_dir {
+                Left::Present(scan::scan(path, opts, &Progress::default()).ok())
+            } else {
+                Left::Present(None)
+            }
+        })
+        .collect();
+    JobResult {
+        left,
+        trashed,
+        result,
+    }
 }
 
 /// One move to the Trash. The removed entries keep their sizes and subtrees,
@@ -58,6 +183,12 @@ struct UndoStep {
     items: Vec<trash::Trashed>,
     entries: Vec<(Vec<u8>, Entry)>,
     offset: usize,
+}
+
+enum Step {
+    Continue,
+    Rescan,
+    Exit(Exit),
 }
 
 enum Action {
@@ -80,19 +211,30 @@ pub fn run(
 ) -> io::Result<()> {
     let mut browser = Browser::new(tree, opts, source, session);
     let result = browser.event_loop(terminal);
+    let exit = result.as_ref().copied().unwrap_or(Exit::Normal);
     // Without this, the next run would load the stale tree again.
-    if browser.changed
+    if browser.saves_cache(exit)
         && let Some(session) = browser.session.take()
     {
         cache::save_in_background(&session, &browser.tree.dir);
     }
     // Freeing millions of nodes takes time and the process ends right after.
     std::mem::forget(browser);
-    result
+    result.map(|_| ())
 }
 
 impl Browser {
     fn new(tree: Tree, opts: Options, source: &Source, session: Option<Header>) -> Self {
+        Self::with_deleter(tree, opts, source, session, real_deleter())
+    }
+
+    fn with_deleter(
+        tree: Tree,
+        opts: Options,
+        source: &Source,
+        session: Option<Header>,
+        deleter: Deleter,
+    ) -> Self {
         let mut browser = Browser {
             tree,
             stack: Vec::new(),
@@ -109,35 +251,241 @@ impl Browser {
             undo: Vec::new(),
             ask_trash: true,
             ask_delete: true,
+            worker: Worker::spawn(opts, deleter),
+            pending: VecDeque::new(),
+            done: VecDeque::new(),
+            quitting: false,
         };
         browser.apply_sort();
         browser
     }
 
-    fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    /// Whether the tree may be saved. A forced quit can leave rows out of
+    /// the tree that are still on disk, so it saves nothing.
+    fn saves_cache(&self, exit: Exit) -> bool {
+        exit == Exit::Normal && self.pending.is_empty() && self.changed
+    }
+
+    pub fn quitting(&self) -> bool {
+        self.quitting
+    }
+
+    /// The state of the delete queue, shown while the user browses.
+    pub fn status(&self) -> Option<String> {
+        let first = self.pending.front()?;
+        if self.quitting {
+            let n = self.pending.len();
+            let deletes = if n == 1 { "delete" } else { "deletes" };
+            return Some(format!(
+                "Finishing {n} {deletes} … press q again to quit now"
+            ));
+        }
+        let items = count(first.paths.len());
+        let mut text = if first.permanent {
+            format!("Deleting {items} …")
+        } else {
+            format!("Moving {items} to the Trash …")
+        };
+        if self.pending.len() > 1 {
+            text = format!("{text} {} more queued", self.pending.len() - 1);
+        }
+        Some(text)
+    }
+
+    fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
         loop {
+            self.poll_jobs();
+            if self.quitting && self.pending.is_empty() {
+                return Ok(Exit::Normal);
+            }
             terminal.draw(|frame| view::draw(frame, self))?;
+            // Nothing changes by itself without a job, so wait for a key.
+            if !self.pending.is_empty() && !event::poll(Duration::from_millis(100))? {
+                continue;
+            }
             let Event::Key(key) = event::read()? else {
                 continue;
             };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match self.handle(key) {
-                Action::None => {}
-                Action::Quit => return Ok(()),
-                Action::Delete { permanent, targets } => {
-                    self.delete(terminal, permanent, &targets)?;
-                    // Keys typed during a slow delete must not start another
-                    // delete without a question. Only a quit key counts.
-                    if !(self.ask_trash && self.ask_delete) && drain_keys()? {
-                        return Ok(());
-                    }
-                }
-                Action::Rescan => self.rescan(terminal)?,
-                Action::Undo => self.undo(),
+            match self.step(key) {
+                Step::Continue => {}
+                Step::Rescan => self.rescan(terminal)?,
+                Step::Exit(exit) => return Ok(exit),
             }
         }
+    }
+
+    /// Handles one key press. Everything but a rescan, which needs the
+    /// terminal, happens here so tests can drive it.
+    fn step(&mut self, key: KeyEvent) -> Step {
+        if self.quitting {
+            return if quits(key) {
+                Step::Exit(Exit::Forced)
+            } else {
+                Step::Continue
+            };
+        }
+        match self.handle(key) {
+            Action::None => {}
+            Action::Quit if self.pending.is_empty() => return Step::Exit(Exit::Normal),
+            Action::Quit => self.quitting = true,
+            Action::Delete { permanent, targets } => self.enqueue(permanent, &targets),
+            Action::Rescan => return Step::Rescan,
+            Action::Undo => self.undo(),
+        }
+        Step::Continue
+    }
+
+    /// Takes the results that the worker has sent and applies those that the
+    /// screen can take now, in the order of the deletes.
+    fn poll_jobs(&mut self) {
+        loop {
+            match self.worker.results.try_recv() {
+                Ok(result) => self.done.push_back(result),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.fail_unfinished();
+                    break;
+                }
+            }
+        }
+        // Indices in `stack`, `cursor`, a question and a range must stay true,
+        // so a put-back waits for a quiet screen. A quit has no screen left.
+        let quiet = self.quitting || (matches!(self.mode, Mode::Browse) && self.range.is_none());
+        while let Some(result) = self.done.front() {
+            if result.changes_tree() && !quiet {
+                break;
+            }
+            let result = self.done.pop_front().expect("front exists");
+            let job = self.pending.pop_front().expect("a result has a job");
+            self.apply(job, result);
+        }
+    }
+
+    /// The worker thread ended, so no result will come. Puts every row back.
+    fn fail_unfinished(&mut self) {
+        while self.done.len() < self.pending.len() {
+            let n = self.pending[self.done.len()].paths.len();
+            self.done.push_back(JobResult {
+                left: (0..n).map(|_| Left::Present(None)).collect(),
+                trashed: Vec::new(),
+                result: Err("the delete thread stopped".into()),
+            });
+        }
+    }
+
+    /// Takes the rows out of the tree at once and sends their paths to the
+    /// worker. The entries stay in `pending` for the undo step or a put-back.
+    fn enqueue(&mut self, permanent: bool, targets: &[usize]) {
+        let folder = self.current_path();
+        let mut targets = targets.to_vec();
+        targets.sort_unstable();
+        targets.dedup();
+        targets.retain(|&i| i < self.dir().entries.len());
+        if targets.is_empty() {
+            return;
+        }
+        let dir = self.dir();
+        let paths: Vec<PathBuf> = targets
+            .iter()
+            .map(|&i| folder.join(os_name(dir.name(&dir.entries[i]))))
+            .collect();
+        let dirs = targets
+            .iter()
+            .map(|&i| dir.entries[i].dir.is_some())
+            .collect();
+        let dir = self.tree.dir_at_mut(&self.stack);
+        // From the end, so the indices that are left stay true.
+        let mut taken: Vec<_> = targets.iter().rev().map(|&i| dir.take(i)).collect();
+        taken.reverse();
+        self.tree.refresh_totals(&self.stack);
+        self.clear_selection();
+        self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
+        self.resort();
+        self.pending.push_back(Pending {
+            folder,
+            paths: paths.clone(),
+            taken,
+            permanent,
+            offset: self.offset,
+        });
+        // A failed send means the worker stopped. `poll_jobs` finds out.
+        let _ = self.worker.jobs.send(Job {
+            paths,
+            dirs,
+            permanent,
+        });
+    }
+
+    /// Settles one finished delete. The rows that are gone become the undo
+    /// step. The rows that are still on disk come back.
+    fn apply(&mut self, job: Pending, result: JobResult) {
+        let total = job.paths.len();
+        let mut removed = Vec::new();
+        let mut back = Vec::new();
+        for (entry, left) in job.taken.into_iter().zip(result.left) {
+            match left {
+                Left::Gone => removed.push(entry),
+                Left::Present(fresh) => back.push((entry, fresh)),
+            }
+        }
+        let gone = removed.len();
+        if !back.is_empty() {
+            self.restore_rows(&job.folder, back);
+        }
+        self.changed = true;
+        let undoable = !result.trashed.is_empty();
+        if undoable {
+            self.undo.push(UndoStep {
+                items: result.trashed,
+                entries: removed,
+                offset: job.offset,
+            });
+        }
+        let asks = *self.ask_mut(job.permanent);
+        self.message = Some(delete_message(
+            job.permanent,
+            gone,
+            total,
+            undoable,
+            asks,
+            &result.result,
+        ));
+    }
+
+    /// Lists rows again that the delete did not remove, in `folder`. A
+    /// directory gets its fresh listing. The screen stays where it is: the
+    /// open folder and the cursor are found again by name.
+    fn restore_rows(&mut self, folder: &Path, back: Vec<Survivor>) {
+        let Some(target) = self.stack_for(folder) else {
+            return;
+        };
+        let here = self.current_path();
+        let dir = self.tree.dir_at_mut(&target);
+        for ((name, mut entry), fresh) in back {
+            // A new item with the same name may exist now. Keep it.
+            if dir.find(&name).is_some() {
+                continue;
+            }
+            entry.flags &= !flag::SELECTED;
+            dir.insert(&name, entry);
+            if let Some(sub) = fresh {
+                let i = dir.entries.len() - 1;
+                let e = &mut dir.entries[i];
+                e.flags &= !(flag::SUB_ERROR | flag::ERROR);
+                (e.disk, e.apparent) = (0, 0);
+                dir.attach(i, sub, 0);
+            }
+        }
+        self.tree.refresh_totals(&target);
+        if target == self.stack {
+            self.resort();
+        }
+        self.stack = self.stack_for(&here).unwrap_or_default();
+        let len = self.dir().entries.len();
+        self.cursor = self.cursor.min(len.saturating_sub(1));
     }
 
     pub fn dir(&self) -> &Dir {
@@ -226,6 +574,14 @@ impl Browser {
             }
             KeyCode::Char('d') => return self.confirm(false),
             KeyCode::Char('D') => return self.confirm(true),
+            KeyCode::Char('r' | 'u') if !self.pending.is_empty() => {
+                let what = if key.code == KeyCode::Char('r') {
+                    "a rescan"
+                } else {
+                    "an undo"
+                };
+                self.message = Some(format!("Wait for the delete to finish before {what}"));
+            }
             KeyCode::Char('r') => return Action::Rescan,
             KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -361,74 +717,6 @@ impl Browser {
         } else {
             &mut self.ask_trash
         }
-    }
-
-    fn delete(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        permanent: bool,
-        targets: &[usize],
-    ) -> io::Result<()> {
-        let base = self.current_path();
-        let paths: Vec<PathBuf> = {
-            let dir = self.dir();
-            targets
-                .iter()
-                .map(|&i| base.join(os_name(dir.name(&dir.entries[i]))))
-                .collect()
-        };
-        let verb = if permanent {
-            "Deleting"
-        } else {
-            "Moving to the Trash:"
-        };
-        self.message = Some(format!("{verb} {} …", count(paths.len())));
-        terminal.draw(|frame| view::draw(frame, self))?;
-
-        let (trashed, result) = if permanent {
-            (Vec::new(), remove_all(&paths))
-        } else {
-            trash::move_to_trash(&paths)
-        };
-        // Reconcile with the disk: drop what is gone, rescan what is still there.
-        let mut pairs: Vec<(usize, PathBuf)> = targets.iter().copied().zip(paths).collect();
-        pairs.sort_unstable_by_key(|&(i, _)| std::cmp::Reverse(i));
-        let total = pairs.len();
-        let mut gone = 0;
-        let mut removed = Vec::new();
-        for (i, path) in pairs {
-            let dir = self.tree.dir_at_mut(&self.stack);
-            if path.symlink_metadata().is_err() {
-                removed.push(dir.take(i));
-                gone += 1;
-            } else if dir.entries[i].dir.is_some()
-                && let Ok(sub) = scan::scan(&path, &self.opts, &Progress::default())
-            {
-                let e = &mut dir.entries[i];
-                e.flags &= !(flag::SUB_ERROR | flag::ERROR);
-                (e.disk, e.apparent) = (0, 0);
-                dir.attach(i, sub, 0);
-            }
-        }
-        self.tree.refresh_totals(&self.stack);
-        self.changed = true;
-        self.clear_selection();
-        self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
-        self.resort();
-        let undoable = !trashed.is_empty();
-        if undoable {
-            self.undo.push(UndoStep {
-                items: trashed,
-                entries: removed,
-                offset: self.offset,
-            });
-        }
-
-        let asks = *self.ask_mut(permanent);
-        self.message = Some(delete_message(
-            permanent, gone, total, undoable, asks, &result,
-        ));
-        Ok(())
     }
 
     /// Puts the latest move to the Trash back, then shows the folder it came
@@ -631,17 +919,6 @@ fn delete_message(
     }
 }
 
-/// Drops the keys that wait. True when one of them quits.
-fn drain_keys() -> io::Result<bool> {
-    let mut quit = false;
-    while event::poll(Duration::ZERO)? {
-        if let Event::Key(key) = event::read()? {
-            quit |= quits(key);
-        }
-    }
-    Ok(quit)
-}
-
 fn quits(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
         && (key.code == KeyCode::Char('q')
@@ -665,7 +942,10 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
         } else {
             std::fs::remove_file(path)
         };
-        if let Err(e) = result {
+        // A path that is gone already is what the user wants.
+        if let Err(e) = result
+            && e.kind() != io::ErrorKind::NotFound
+        {
             first_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
         }
     }
@@ -674,6 +954,8 @@ fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::tree::Kind;
 
@@ -982,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn only_q_and_ctrl_c_quit_from_the_dropped_keys() {
+    fn only_q_and_ctrl_c_quit_while_a_delete_finishes() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(quits(key('q')) && quits(ctrl_c));
         assert!(!quits(key('D')) && !quits(key('c')) && !quits(key('A')));
@@ -995,5 +1277,346 @@ mod tests {
             Some(cache::ELEVATE_HINT)
         );
         assert_eq!(describe(&Source::Scanned), None);
+    }
+
+    type Seen = Arc<Mutex<Vec<Vec<PathBuf>>>>;
+
+    /// A deleter that waits for one `()` per job, records its paths, and
+    /// lets `act` do the work on each path. It never touches the Trash.
+    fn gated(
+        gate: mpsc::Receiver<()>,
+        seen: &Seen,
+        act: impl Fn(&Path) -> Result<(), String> + Send + 'static,
+    ) -> Deleter {
+        let seen = Arc::clone(seen);
+        Box::new(move |paths, permanent| {
+            let _ = gate.recv();
+            seen.lock().unwrap().push(paths.to_vec());
+            let mut first = None;
+            let mut trashed = Vec::new();
+            for path in paths {
+                match act(path) {
+                    Ok(()) if !permanent && path.symlink_metadata().is_err() => {
+                        trashed.push(trash::Trashed::fake(path.clone()));
+                    }
+                    Ok(()) => {}
+                    Err(e) => {
+                        first.get_or_insert(e);
+                    }
+                }
+            }
+            (trashed, first.map_or(Ok(()), Err))
+        })
+    }
+
+    fn remove(path: &Path) -> Result<(), String> {
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        result.or_else(|e| match e.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e.to_string()),
+        })
+    }
+
+    fn file_name(path: &Path) -> &str {
+        path.file_name().and_then(|n| n.to_str()).unwrap()
+    }
+
+    /// A browser on real files, sorted by name, with a gated deleter. Each
+    /// `()` on the returned sender lets one job run.
+    fn gated_browser(
+        root: &Path,
+        files: &[&str],
+        act: impl Fn(&Path) -> Result<(), String> + Send + 'static,
+    ) -> (Browser, mpsc::Sender<()>, Seen) {
+        for (n, file) in files.iter().enumerate() {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; 1000 * (n + 1)]).unwrap();
+        }
+        let dir = scan::scan(root, &opts(), &Progress::default()).unwrap();
+        let tree = Tree {
+            path: root.to_path_buf(),
+            dir: Box::new(dir),
+        };
+        let (gate, rx) = mpsc::channel();
+        let seen = Seen::default();
+        let deleter = gated(rx, &seen, act);
+        let mut browser = Browser::with_deleter(tree, opts(), &Source::Scanned, None, deleter);
+        browser.set_sort(SortKey::Name);
+        (browser, gate, seen)
+    }
+
+    fn go_to(browser: &mut Browser, name: &str) {
+        point_at(browser, name);
+        browser.open();
+    }
+
+    fn point_at(browser: &mut Browser, name: &str) {
+        browser.cursor = browser.dir().find(name.as_bytes()).unwrap();
+    }
+
+    fn press(browser: &mut Browser, keys: &str) {
+        for c in keys.chars() {
+            assert!(matches!(browser.step(key(c)), Step::Continue));
+        }
+    }
+
+    fn names(browser: &Browser) -> Vec<String> {
+        let dir = browser.dir();
+        dir.entries
+            .iter()
+            .map(|e| String::from_utf8_lossy(dir.name(e)).into_owned())
+            .collect()
+    }
+
+    fn wait(browser: &mut Browser, until: impl Fn(&Browser) -> bool) {
+        let start = std::time::Instant::now();
+        loop {
+            browser.poll_jobs();
+            if until(browser) {
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn keys_work_while_a_delete_is_blocked_and_the_rows_are_already_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2", "A/a3", "top"], remove);
+        go_to(&mut b, "A");
+        let before = b.dir().totals();
+        point_at(&mut b, "a2");
+        press(&mut b, "dy");
+        assert_eq!(names(&b), ["a1", "a3"]);
+        assert!(b.dir().totals().items < before.items);
+        assert!(b.dir().totals().disk < before.disk);
+        assert_eq!(b.status().as_deref(), Some("Moving 1 item to the Trash …"));
+        press(&mut b, "jk");
+        assert_eq!(name_at_cursor(&b), b"a1");
+        assert!(b.message.is_none());
+        assert!(b.status().is_some(), "the queue state outlives key presses");
+        assert!(tmp.path().join("A/a2").exists(), "the job has not run");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert!(!tmp.path().join("A/a2").exists());
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Moved to the Trash: 1 item. Press u to undo.")
+        );
+        assert_eq!(b.undo.len(), 1);
+        assert!(b.status().is_none());
+    }
+
+    #[test]
+    fn two_deletes_in_two_folders_keep_the_view_and_the_undo_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = ["A/a1", "A/a2", "B/b1", "B/b2"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, remove);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        press(&mut b, "h");
+        go_to(&mut b, "B");
+        press(&mut b, "s");
+        point_at(&mut b, "b2");
+        press(&mut b, "dy");
+        let (stack, here) = (b.stack.clone(), name_at_cursor(&b).to_vec());
+        assert_eq!(
+            b.status().unwrap(),
+            "Moving 1 item to the Trash … 1 more queued"
+        );
+        gate.send(()).unwrap();
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(
+            (b.stack.clone(), name_at_cursor(&b).to_vec()),
+            (stack, here)
+        );
+        assert_eq!(b.undo.len(), 2);
+        assert!(b.undo[0].items[0].original.ends_with("A/a1"));
+        assert!(b.undo[1].items[0].original.ends_with("B/b2"));
+    }
+
+    #[test]
+    fn a_put_back_waits_while_the_question_is_open_and_does_not_change_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let busy = |p: &Path| match file_name(p) {
+            "a1" => Err("busy".to_string()),
+            _ => remove(p),
+        };
+        let (mut b, gate, seen) = gated_browser(tmp.path(), &["A/a1", "A/a2", "A/a3"], busy);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        point_at(&mut b, "a2");
+        press(&mut b, "d");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.done.len() == 1);
+        // The result stays put, so the indices in the question stay true.
+        assert!(matches!(&b.mode, Mode::Confirm { targets, .. } if targets == &[0]));
+        assert_eq!(names(&b), ["a2", "a3"]);
+        assert_eq!(b.pending.len(), 1);
+        press(&mut b, "y");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        let jobs = seen.lock().unwrap().clone();
+        assert_eq!(jobs[1], [tmp.path().join("A/a2")]);
+        assert_eq!(names(&b), ["a1", "a3"]);
+        assert!(tmp.path().join("A/a1").exists());
+    }
+
+    #[test]
+    fn a_put_back_waits_while_a_range_is_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let busy = |p: &Path| match file_name(p) {
+            "a1" => Err("busy".to_string()),
+            _ => remove(p),
+        };
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2", "A/a3"], busy);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        press(&mut b, "J");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.done.len() == 1);
+        assert_eq!(names(&b), ["a2", "a3"]);
+        press(&mut b, "j");
+        b.poll_jobs();
+        assert_eq!(names(&b), ["a1", "a2", "a3"]);
+    }
+
+    #[test]
+    fn a_put_back_into_an_ancestor_keeps_the_open_folder_and_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let busy = |p: &Path| match file_name(p) {
+            "a1" => Err("busy".to_string()),
+            _ => remove(p),
+        };
+        let files = ["A/a1", "A/sub/s1", "A/sub/s2", "A/sub/s3"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, busy);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        go_to(&mut b, "sub");
+        press(&mut b, "j");
+        let (path, here) = (b.current_path(), name_at_cursor(&b).to_vec());
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(b.current_path(), path);
+        assert_eq!(name_at_cursor(&b), here);
+        assert_eq!(b.stack_for(&path), Some(b.stack.clone()));
+        let a = b.dir().find(b"a1");
+        assert!(a.is_none(), "a1 belongs to the parent folder");
+        press(&mut b, "h");
+        assert_eq!(names(&b), ["a1", "sub"]);
+    }
+
+    #[test]
+    fn a_partly_failed_delete_undoes_what_is_gone_and_rescans_what_is_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let act = |p: &Path| match file_name(p) {
+            "sub" => {
+                std::fs::remove_file(p.join("s1")).unwrap();
+                Err("busy".to_string())
+            }
+            _ => remove(p),
+        };
+        let files = ["A/a1", "A/sub/s1", "A/sub/s2"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, act);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "  dy");
+        assert_eq!(b.dir().entries.len(), 0);
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(names(&b), ["sub"]);
+        let sub = b.dir().entries[0].dir.as_ref().unwrap();
+        assert_eq!((sub.find(b"s1"), sub.find(b"s2").is_some()), (None, true));
+        assert_eq!(b.dir().entries[0].items, 2, "the folder and s2");
+        assert_eq!(b.undo.len(), 1);
+        assert_eq!(b.undo[0].entries.len(), 1);
+        assert_eq!(b.undo[0].entries[0].0, b"a1");
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Moved to the Trash: 1 of 2 items. Press u to undo. Error: busy")
+        );
+    }
+
+    #[test]
+    fn rescan_and_undo_wait_for_pending_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], remove);
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        press(&mut b, "r");
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Wait for the delete to finish before a rescan")
+        );
+        press(&mut b, "u");
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Wait for the delete to finish before an undo")
+        );
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert!(matches!(b.step(key('r')), Step::Rescan));
+    }
+
+    #[test]
+    fn a_normal_quit_waits_and_saves_and_a_forced_quit_saves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], remove);
+        assert!(matches!(b.step(key('q')), Step::Exit(Exit::Normal)));
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        press(&mut b, "q");
+        assert!(b.quitting());
+        assert_eq!(
+            b.status().as_deref(),
+            Some("Finishing 1 delete … press q again to quit now")
+        );
+        assert!(!b.saves_cache(Exit::Normal), "the delete has not finished");
+        assert!(!b.saves_cache(Exit::Forced));
+        // Other keys do nothing while the quit waits.
+        press(&mut b, "j");
+        assert!(matches!(b.step(key('q')), Step::Exit(Exit::Forced)));
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert!(b.saves_cache(Exit::Normal));
+        assert!(!b.saves_cache(Exit::Forced));
+    }
+
+    #[test]
+    fn a_delete_of_a_parent_counts_a_pending_child_that_is_already_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let act = |p: &Path| match file_name(p) {
+            // The child job removes the whole folder, as a parent delete would.
+            "a1" => remove(p.parent().unwrap()),
+            _ => remove(p),
+        };
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2", "top"], act);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        press(&mut b, "h");
+        point_at(&mut b, "A");
+        press(&mut b, "dy");
+        gate.send(()).unwrap();
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(names(&b), ["top"]);
+        assert!(!tmp.path().join("A").exists());
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Moved to the Trash: 1 item. Press u to undo.")
+        );
+        assert_eq!(b.undo.len(), 2);
     }
 }
