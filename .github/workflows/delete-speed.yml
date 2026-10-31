@@ -1,0 +1,55 @@
+name: Delete speed
+
+# Experiment only. Times ways to delete a folder and to move it to the Trash.
+on:
+  push:
+    branches: [experiment/delete-speed]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bench:
+    name: ${{ matrix.os }} ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - { name: tree-a, args: "--tree a --rounds 5" }
+          - { name: tree-b, args: "--tree b --rounds 4" }
+          - { name: tree-c, args: "--tree c --rounds 5" }
+          - { name: trash-a, args: "--tree a --rounds 3 --trash" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --example delete_bench
+      - name: Machine
+        run: |
+          case "$RUNNER_OS" in
+            macOS) sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; sw_vers; df -h "$HOME" ;;
+            Linux) grep -m1 'model name' /proc/cpuinfo; nproc; free -m; df -hT "$HOME"; ulimit -n ;;
+            Windows) powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfLogicalProcessors | Format-List"; powershell -NoProfile -Command "Get-MpPreference | Select-Object DisableRealtimeMonitoring | Format-List" ;;
+          esac
+      - name: Run (warm cache)
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then s="$(cygpath -m "$RUNNER_TEMP")/delbench"; else s="$HOME/delbench"; fi
+          mkdir -p "$RUNNER_TEMP/out"
+          target/release/examples/delete_bench ${{ matrix.args }} --scratch "$s" | tee "$RUNNER_TEMP/out/warm.log"
+      - name: Run (cache dropped before each delete)
+        if: ${{ matrix.name == 'tree-a' && runner.os != 'Windows' }}
+        run: |
+          target/release/examples/delete_bench ${{ matrix.args }} --cold --scratch "$HOME/delbench" | tee "$RUNNER_TEMP/out/cold.log"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: delete-${{ matrix.os }}-${{ matrix.name }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: warn
