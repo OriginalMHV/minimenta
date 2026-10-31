@@ -9,7 +9,15 @@
 //! relative to that descriptor, so no thread resolves a long path again, and a
 //! symlink that replaces a folder in the middle of the walk cannot lead the
 //! walk out of the tree. On Windows the walk uses `read_dir`, `remove_file`
-//! and `remove_dir`.
+//! and `remove_dir`. It holds each folder open without delete sharing, so
+//! nobody can swap the folder or one of its parents for a junction.
+//!
+//! The walk never leaves the device of the root folder. It compares `st_dev`
+//! and refuses a folder with another value. That catches a mounted file system.
+//! It does not catch a Linux bind mount of the same file system, because the
+//! device is the same (`remove_dir_all` does not catch it either). A btrfs
+//! subvolume and some FUSE layers report their own device, so the walk refuses
+//! them too, and the folder stays with an error.
 //!
 //! Evidence for the design is in docs/experiments.md.
 
@@ -17,6 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use rayon::ThreadPool;
 use rayon::prelude::*;
@@ -24,8 +33,8 @@ use rayon::prelude::*;
 /// Names per task in a big folder. A folder with fewer names stays on one thread.
 const CHUNK: usize = 1024;
 
-/// The most threads. More threads were slower on Windows and gave nothing on Linux.
-const MAX_THREADS: usize = 8;
+/// Threads in the pool.
+const THREADS: usize = 8;
 
 /// The entries of one folder, split by what the walk does with them.
 struct Listing {
@@ -59,19 +68,26 @@ pub fn remove_tree(path: &Path) -> io::Result<()> {
 
 /// One pool for the whole program. The scanner may use the global pool, and the
 /// worker runs one delete at a time, so a private pool never competes with it.
+///
+/// The size is fixed and does not follow the core count. A delete waits on the
+/// kernel and the disk, so more threads than cores still help. Linux cold: 8
+/// threads gave 4.75x and 4 threads 3.24x. macOS warm: 1.37x against 1.11x.
+/// On Windows 8 equal 4 (1.53x) and 16 was worse (1.35x).
+///
+/// The stack is large because a deep tree drops its `Arc` chain and builds
+/// paths with recursion, and a release build aborts on a stack overflow.
 fn pool() -> io::Result<&'static ThreadPool> {
-    static POOL: OnceLock<ThreadPool> = OnceLock::new();
-    if let Some(pool) = POOL.get() {
-        return Ok(pool);
-    }
-    sys::raise_open_files();
-    let threads = std::thread::available_parallelism().map_or(4, usize::from);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads.min(MAX_THREADS))
-        .thread_name(|i| format!("delete-{i}"))
-        .build()
-        .map_err(io::Error::other)?;
-    Ok(POOL.get_or_init(|| pool))
+    static POOL: OnceLock<Result<ThreadPool, String>> = OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        sys::raise_open_files();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(THREADS)
+            .stack_size(8 * 1024 * 1024)
+            .thread_name(|i| format!("delete-{i}"))
+            .build()
+            .map_err(|e| e.to_string())
+    });
+    pool.as_ref().map_err(|e| io::Error::other(e.clone()))
 }
 
 struct Shared {
@@ -154,13 +170,33 @@ impl Drop for Node {
 
 /// Removes the empty folder `node` from `parent`.
 fn finish(parent: &sys::Handle, node: &Node) {
+    // Windows cannot remove a folder that this walk still holds open.
+    sys::release(&node.handle);
     match sys::rmdir(parent, &node.name) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        // An earlier error explains why the folder is not empty.
+        Err(e) if sys::not_empty(&e) && node.shared.failed.load(Ordering::Relaxed) => {}
         Err(e) if sys::not_empty(&e) => {
-            // Something created an entry after the listing. Sweep, retry once.
-            sweep(&node.handle, &node.path(), &node.shared);
-            if let Err(e) = sys::rmdir(parent, &node.name)
+            // Something created an entry after the listing. Sweep, retry.
+            match sys::open_child(parent, &node.name, node.shared.dev) {
+                Ok(handle) => sweep(&handle, &node.path(), &node.shared),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+                Err(e) => {
+                    node.shared.fail(|| node.path(), e);
+                    return;
+                }
+            }
+            let mut result = sys::rmdir(parent, &node.name);
+            // A virus scanner can keep removed entries pending for a moment.
+            for delay in sys::RETRY_DELAYS {
+                if !result.as_ref().is_err_and(sys::not_empty) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(delay));
+                result = sys::rmdir(parent, &node.name);
+            }
+            if let Err(e) = result
                 && e.kind() != io::ErrorKind::NotFound
             {
                 node.shared.fail(|| node.path(), e);
@@ -334,6 +370,10 @@ mod sys {
     /// Opens a child folder. A folder on another device is a mount point and is
     /// refused. `remove_dir_all` would enter it. This walk stops with an error
     /// instead, because the user chose to delete one tree and not another disk.
+    /// The check sees only a different `st_dev`. A Linux bind mount of the same
+    /// file system has the same device and is not caught (`remove_dir_all` does
+    /// not catch it either). A btrfs subvolume or a FUSE layer with its own
+    /// device is refused.
     pub fn open_child(parent: &Handle, name: &Name, dev: Dev) -> io::Result<Handle> {
         let (handle, child_dev) = open_at(parent, name)?;
         if child_dev == dev {
@@ -346,7 +386,7 @@ mod sys {
     /// Lists a folder without following links.
     pub fn list(handle: &Handle) -> io::Result<Listing> {
         // `closedir` closes the descriptor, so the stream gets a copy.
-        let copy = unsafe { libc::dup(handle.fd.as_raw_fd()) };
+        let copy = unsafe { libc::fcntl(handle.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
         if copy < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -411,6 +451,13 @@ mod sys {
         check(unsafe { libc::unlinkat(parent.fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
     }
 
+    /// A descriptor closes when its folder is dropped, and Unix can remove a
+    /// folder that is open.
+    pub fn release(_handle: &Handle) {}
+
+    /// Delays before the next try to remove a folder that is not empty.
+    pub const RETRY_DELAYS: [u64; 0] = [];
+
     pub fn not_empty(error: &io::Error) -> bool {
         matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST))
     }
@@ -453,14 +500,30 @@ mod sys {
     use std::io;
     use std::path::{Path, PathBuf};
 
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::sync::Mutex;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        SYNCHRONIZE,
+    };
+
     use super::Listing;
 
     pub type Name = OsString;
     pub type Dev = u64;
 
-    /// A folder is its path. Windows has no descriptor to open it relative to.
+    /// A folder is its path, and `read_dir` resolves it again for each call.
+    /// To keep that path safe, the walk also holds the folder open without
+    /// `FILE_SHARE_DELETE`. Nobody can rename or replace a folder while it is
+    /// open, and nobody can do it to its parents, so a junction or symlink
+    /// cannot take the place of a folder in the middle of the walk (the hole
+    /// that CVE-2022-21658 closed in std). The handle closes just before the
+    /// folder is removed.
     pub struct Handle {
         path: PathBuf,
+        held: Mutex<Option<fs::File>>,
     }
 
     pub fn open_parent(path: &Path) -> io::Result<(Handle, Name)> {
@@ -474,27 +537,48 @@ mod sys {
         Ok((
             Handle {
                 path: parent.to_path_buf(),
+                held: Mutex::new(None),
             },
             name.to_os_string(),
         ))
     }
 
-    /// Refuses a symlink, a junction and a file.
-    pub fn open_root(parent: &Handle, name: &Name) -> io::Result<(Handle, Dev)> {
-        let path = parent.path.join(name);
-        let file_type = fs::symlink_metadata(&path)?.file_type();
-        if file_type.is_symlink() || !file_type.is_dir() {
+    /// Opens a folder and holds it. A symlink, a junction and a file are refused.
+    fn hold(path: PathBuf) -> io::Result<Handle> {
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)?;
+        let meta = file.metadata()?;
+        let attributes = meta.file_attributes();
+        let link = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && meta.file_type().is_symlink();
+        if link || attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
         }
-        Ok((Handle { path }, 0))
-    }
-
-    #[allow(clippy::unnecessary_wraps)]
-    pub fn open_child(parent: &Handle, name: &Name, _dev: Dev) -> io::Result<Handle> {
         Ok(Handle {
-            path: parent.path.join(name),
+            path,
+            held: Mutex::new(Some(file)),
         })
     }
+
+    pub fn open_root(parent: &Handle, name: &Name) -> io::Result<(Handle, Dev)> {
+        Ok((hold(parent.path.join(name))?, 0))
+    }
+
+    pub fn open_child(parent: &Handle, name: &Name, _dev: Dev) -> io::Result<Handle> {
+        hold(parent.path.join(name))
+    }
+
+    pub fn release(handle: &Handle) {
+        *handle
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Delays before the next try to remove a folder that is not empty.
+    pub const RETRY_DELAYS: [u64; 3] = [20, 50, 100];
 
     /// A symlink or a junction is listed as a file, so the walk removes the
     /// link and never enters it. `FileType::is_symlink` is true for every
@@ -519,22 +603,28 @@ mod sys {
     }
 
     /// Removes a file, a file symlink, or a link to a folder. Like std, a
-    /// read-only item loses the attribute and is tried again.
+    /// read-only file loses the attribute and is tried again. A link never
+    /// does, because `set_permissions` would follow it and change its target.
     pub fn unlink(handle: &Handle, name: &Name) -> io::Result<()> {
         let path = handle.path.join(name);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                if let Ok(meta) = fs::symlink_metadata(&path) {
-                    let mut permissions = meta.permissions();
-                    // Windows only: the attribute, not a Unix mode.
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    permissions.set_readonly(false);
-                    let _ = fs::set_permissions(&path, permissions);
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    return Err(e);
+                };
+                if meta.file_type().is_symlink() {
+                    return fs::remove_dir(&path).map_err(|_| e);
                 }
-                fs::remove_file(&path)
-                    .or_else(|_| fs::remove_dir(&path))
-                    .map_err(|_| e)
+                if !meta.permissions().readonly() {
+                    return Err(e);
+                }
+                let mut permissions = meta.permissions();
+                // Windows only: the attribute, not a Unix mode.
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                let _ = fs::set_permissions(&path, permissions);
+                fs::remove_file(&path).map_err(|_| e)
             }
             Err(e) => fs::remove_dir(&path).map_err(|_| e),
         }
@@ -575,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_a_large_mixed_tree_like_remove_dir_all() {
+    fn removes_a_nested_tree_with_an_empty_folder_and_a_big_file() {
         let tmp = tempfile::tempdir().unwrap();
         let (ours, theirs) = (tmp.path().join("ours"), tmp.path().join("theirs"));
         for root in [&ours, &theirs] {
@@ -633,7 +723,8 @@ mod tests {
 
     #[test]
     fn a_path_without_a_final_name_is_refused() {
-        let error = remove_tree(Path::new("/")).unwrap_err();
+        let tmp = tempfile::tempdir().unwrap();
+        let error = remove_tree(&tmp.path().join("x").join("..")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -754,6 +845,127 @@ mod tests {
         finish(&parent, &node);
         shared.take_error().unwrap();
         assert!(!root.exists());
+    }
+
+    /// A tree with the folder `sub` that the tests open by hand.
+    #[cfg(unix)]
+    fn open_tree(root: &Path) -> (sys::Handle, sys::Dev) {
+        let (parent, name) = sys::open_parent(root).unwrap();
+        sys::open_root(&parent, &name).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn outside_with_a_file(tmp: &Path) -> PathBuf {
+        let outside = tmp.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"x").unwrap();
+        outside
+    }
+
+    #[cfg(unix)]
+    fn refused_as_a_link(error: &io::Error) -> bool {
+        matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_symlink_after_the_listing_is_not_entered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = outside_with_a_file(tmp.path());
+        let root = tmp.path().join("tree");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let (handle, dev) = open_tree(&root);
+        let listing = sys::list(&handle).unwrap();
+        assert_eq!(listing.dirs.len(), 1);
+
+        fs::remove_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+
+        let error = sys::open_child(&handle, &listing.dirs[0], dev)
+            .err()
+            .unwrap();
+        assert!(refused_as_a_link(&error), "{error}");
+        assert!(outside.join("keep").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_child_that_is_a_symlink_to_a_folder_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = outside_with_a_file(tmp.path());
+        let root = tmp.path().join("tree");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let (handle, dev) = open_tree(&root);
+        let name = std::ffi::CString::new("link").unwrap();
+        // Without O_NOFOLLOW this open would succeed and enter `outside`.
+        let error = sys::open_child(&handle, &name, dev).err().unwrap();
+        assert!(refused_as_a_link(&error), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_on_another_device_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let (handle, dev) = open_tree(&root);
+        let name = std::ffi::CString::new("sub").unwrap();
+        assert!(sys::open_child(&handle, &name, dev).is_ok());
+        let error = sys::open_child(&handle, &name, dev.wrapping_add(1))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("another file system"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_swapped_for_a_symlink_is_refused_and_a_held_folder_cannot_be_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"x").unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let (parent, name) = sys::open_parent(&root).unwrap();
+        let (handle, dev) = sys::open_root(&parent, &name).unwrap();
+        let sub = sys::open_child(&handle, &std::ffi::OsString::from("sub"), dev).unwrap();
+        // Nobody can replace a folder that the walk holds.
+        assert!(fs::rename(root.join("sub"), root.join("moved")).is_err());
+        sys::release(&sub);
+        fs::remove_dir(root.join("sub")).unwrap();
+        if std::os::windows::fs::symlink_dir(&outside, root.join("sub")).is_err() {
+            eprintln!("skipped: this account may not create symlinks");
+            return;
+        }
+        let error = sys::open_child(&handle, &std::ffi::OsString::from("sub"), dev)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(outside.join("keep").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_target_behind_a_link_keeps_its_attribute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::write(&target, b"x").unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions).unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir(&root).unwrap();
+        if std::os::windows::fs::symlink_file(&target, root.join("link")).is_err() {
+            eprintln!("skipped: this account may not create symlinks");
+            return;
+        }
+        remove_tree(&root).unwrap();
+        assert!(fs::metadata(&target).unwrap().permissions().readonly());
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&target, permissions).unwrap();
     }
 
     #[test]
