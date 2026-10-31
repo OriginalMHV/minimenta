@@ -74,8 +74,12 @@ pub struct Browser {
 }
 
 /// A second press of the same delete key within this time is ignored when
-/// the question is off.
-const REPEAT_GUARD: Duration = Duration::from_millis(300);
+/// the question is off. It is longer than the usual delay before a held key
+/// repeats (about 375 ms on macOS).
+/// The longest error text that finished deletes can add up to.
+const MAX_ERROR_CHARS: usize = 600;
+
+const REPEAT_GUARD: Duration = Duration::from_millis(600);
 
 /// Frees `value` on a short-lived thread. A removed subtree can hold millions
 /// of nodes, and dropping it on the UI thread would freeze the screen.
@@ -483,7 +487,16 @@ impl Browser {
     fn show_delete_message(&mut self, text: String, is_error: bool) {
         let old = self.message.take().filter(|_| self.message_is_error);
         (self.message, self.message_is_error) = match (old, is_error) {
-            (Some(old), _) => (Some(format!("{old} {text}")), true),
+            (Some(old), _) => {
+                let all = format!("{old} {text}");
+                let extra = all.chars().count().saturating_sub(MAX_ERROR_CHARS);
+                let all = if extra == 0 {
+                    all
+                } else {
+                    format!("…{}", all.chars().skip(extra + 1).collect::<String>())
+                };
+                (Some(all), true)
+            }
             (None, _) => (Some(text), is_error),
         };
     }
@@ -498,10 +511,12 @@ impl Browser {
         };
         let here = self.current_path();
         let dir = self.tree.dir_at_mut(&target);
+        let mut dropped = Vec::new();
+        let mut old_dirs = Vec::new();
         for ((name, mut entry), fresh) in back {
             // A new item with the same name may exist now. Keep it.
             if dir.find(&name).is_some() {
-                discard((entry, fresh));
+                dropped.push((entry, fresh));
                 continue;
             }
             entry.flags &= !flag::SELECTED;
@@ -511,10 +526,11 @@ impl Browser {
                 let e = &mut dir.entries[i];
                 e.flags &= !(flag::SUB_ERROR | flag::ERROR);
                 (e.disk, e.apparent) = (0, 0);
-                discard(e.dir.take());
+                old_dirs.extend(e.dir.take());
                 dir.attach(i, sub, 0);
             }
         }
+        discard((dropped, old_dirs));
         self.tree.refresh_totals(&target);
         if target == self.stack {
             self.resort();
@@ -762,6 +778,10 @@ impl Browser {
             });
             self.last_quick_delete = Some((permanent, now));
             if repeat {
+                let key = if permanent { 'D' } else { 'd' };
+                self.message = Some(format!(
+                    "Ignored a quick repeat of {key}. Pause a moment to delete the next row."
+                ));
                 Action::None
             } else {
                 Action::Delete { permanent, targets }
@@ -832,13 +852,16 @@ impl Browser {
             .map(<[u8]>::to_vec)
             .collect();
         let mut restored = HashSet::new();
+        let mut dropped = Vec::new();
         for (name, mut entry) in entries {
             if present.contains(&name) || folder.join(os_name(&name)).symlink_metadata().is_err() {
+                dropped.push(entry);
                 continue;
             }
             entry.flags &= !flag::SELECTED;
             restored.insert(dir.insert(&name, entry));
         }
+        discard(dropped);
         if restored.is_empty() {
             return;
         }
@@ -1729,22 +1752,45 @@ mod tests {
         b.clock = Box::new(move || *clock.lock().unwrap());
         (b.ask_trash, b.ask_delete) = (false, false);
         go_to(&mut b, "A");
-        press(&mut b, "d");
-        *at.lock().unwrap() = base + Duration::from_millis(100);
-        press(&mut b, "dd");
-        assert_eq!(names(&b), ["a2", "a3", "a4"], "repeats are ignored");
+        let press_at = |b: &mut Browser, ms: u64, keys: &str| {
+            *at.lock().unwrap() = base + Duration::from_millis(ms);
+            press(b, keys);
+        };
+        press_at(&mut b, 0, "d");
+        assert_eq!(names(&b), ["a2", "a3", "a4"]);
+        // The first auto-repeat of a held key on macOS comes after about 375 ms.
+        press_at(&mut b, 400, "d");
+        assert_eq!(names(&b), ["a2", "a3", "a4"], "a repeat is ignored");
+        assert_eq!(
+            b.message.as_deref(),
+            Some("Ignored a quick repeat of d. Pause a moment to delete the next row.")
+        );
+        // The ignored press at 400 moved the stamp, so 800 is still too soon.
+        press_at(&mut b, 800, "d");
+        assert_eq!(names(&b), ["a2", "a3", "a4"]);
         // D is another key.
-        press(&mut b, "D");
+        press_at(&mut b, 850, "D");
         assert_eq!(names(&b), ["a3", "a4"]);
-        // The ignored presses did not restart the clock for good.
-        *at.lock().unwrap() = base + Duration::from_millis(900);
-        press(&mut b, "d");
+        press_at(&mut b, 900, "D");
+        assert!(b.message.as_deref().unwrap().contains("repeat of D"));
+        press_at(&mut b, 1500, "d");
         assert_eq!(names(&b), ["a4"]);
         for _ in 0..3 {
             gate.send(()).unwrap();
         }
         wait(&mut b, |b| b.pending.is_empty());
         assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_added_error_text_has_a_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, _gate, _) = gated_browser(tmp.path(), &["A/a1"], remove);
+        for _ in 0..50 {
+            b.show_delete_message("e".repeat(100), true);
+        }
+        let len = b.message.as_ref().unwrap().chars().count();
+        assert!(len <= MAX_ERROR_CHARS);
     }
 
     #[test]
