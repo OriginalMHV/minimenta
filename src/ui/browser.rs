@@ -73,12 +73,12 @@ pub struct Browser {
     clock: Box<dyn Fn() -> Instant>,
 }
 
-/// A second press of the same delete key within this time is ignored when
-/// the question is off. It is longer than the usual delay before a held key
-/// repeats (about 375 ms on macOS).
 /// The longest error text that finished deletes can add up to.
 const MAX_ERROR_CHARS: usize = 600;
 
+/// A second press of the same delete key within this time is ignored when
+/// the question is off. It is longer than the usual delay before a held key
+/// repeats (about 375 ms on macOS).
 const REPEAT_GUARD: Duration = Duration::from_millis(600);
 
 /// Frees `value` on a short-lived thread. A removed subtree can hold millions
