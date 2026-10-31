@@ -192,14 +192,32 @@ fn tail(text: &str, max: usize) -> String {
     format!("…{}", text.chars().skip(len - keep).collect::<String>())
 }
 
+/// The message first, then the queue state. A long message is cut with `…`
+/// so the queue state stays on the line.
+fn message_and_status(message: &str, status: &str, width: usize) -> String {
+    const SEP: &str = "  |  ";
+    let room = width.saturating_sub(1 + SEP.len() + status.chars().count());
+    let len = message.chars().count();
+    if len <= room || room < 12 {
+        return format!("{message}{SEP}{status}");
+    }
+    let cut: String = message.chars().take(room - 1).collect();
+    format!("{cut}…{SEP}{status}")
+}
+
 fn footer_line(b: &Browser, width: usize) -> Line<'static> {
     let status = b.status();
     let message = if b.quitting() {
         None
     } else {
-        b.message.as_ref()
+        b.message.as_deref()
     };
-    if let Some(text) = message.or(status.as_ref()) {
+    let text = match (message, status.as_deref()) {
+        (Some(m), Some(s)) => Some(message_and_status(m, s, width)),
+        (Some(t), None) | (None, Some(t)) => Some(t.to_string()),
+        (None, None) => None,
+    };
+    if let Some(text) = text {
         return bar(&format!(" {text}"));
     }
     let t = b.dir().totals();

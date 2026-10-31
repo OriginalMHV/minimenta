@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -64,6 +64,23 @@ pub struct Browser {
     done: VecDeque<JobResult>,
     /// A quit waits for the pending deletes.
     quitting: bool,
+    /// The message is an error from a delete. Keys that only move the cursor
+    /// leave it on the screen.
+    message_is_error: bool,
+    /// The last delete that skipped the question, to ignore a key that is held
+    /// down or bounces.
+    last_quick_delete: Option<(bool, Instant)>,
+    clock: Box<dyn Fn() -> Instant>,
+}
+
+/// A second press of the same delete key within this time is ignored when
+/// the question is off.
+const REPEAT_GUARD: Duration = Duration::from_millis(300);
+
+/// Frees `value` on a short-lived thread. A removed subtree can hold millions
+/// of nodes, and dropping it on the UI thread would freeze the screen.
+fn discard<T: Send + 'static>(value: T) {
+    thread::spawn(move || drop(value));
 }
 
 /// How the event loop ended. A forced quit leaves the cache as it was.
@@ -160,7 +177,9 @@ fn run_job(job: &Job, opts: &Options, deleter: &mut Deleter) -> JobResult {
         .iter()
         .zip(&job.dirs)
         .map(|(path, &is_dir)| {
-            if path.symlink_metadata().is_err() {
+            // The name may exist again, for example a new file, but the
+            // deleter moved the old one.
+            if trashed.iter().any(|t| t.original == *path) || path.symlink_metadata().is_err() {
                 Left::Gone
             } else if is_dir {
                 Left::Present(scan::scan(path, opts, &Progress::default()).ok())
@@ -255,6 +274,9 @@ impl Browser {
             pending: VecDeque::new(),
             done: VecDeque::new(),
             quitting: false,
+            message_is_error: false,
+            last_quick_delete: None,
+            clock: Box::new(Instant::now),
         };
         browser.apply_sort();
         browser
@@ -277,8 +299,11 @@ impl Browser {
             let n = self.pending.len();
             let deletes = if n == 1 { "delete" } else { "deletes" };
             return Some(format!(
-                "Finishing {n} {deletes} … press q again to quit now"
+                "Finishing {n} {deletes} … press q again to quit now or Esc to stay"
             ));
+        }
+        if !self.done.is_empty() {
+            return Some("Waiting to update the list …".into());
         }
         let items = count(first.paths.len());
         let mut text = if first.permanent {
@@ -321,11 +346,13 @@ impl Browser {
     /// terminal, happens here so tests can drive it.
     fn step(&mut self, key: KeyEvent) -> Step {
         if self.quitting {
-            return if quits(key) {
-                Step::Exit(Exit::Forced)
-            } else {
-                Step::Continue
-            };
+            if quits(key) {
+                return Step::Exit(Exit::Forced);
+            }
+            if key.code == KeyCode::Esc {
+                self.quitting = false;
+            }
+            return Step::Continue;
         }
         match self.handle(key) {
             Action::None => {}
@@ -443,16 +470,22 @@ impl Browser {
                 entries: removed,
                 offset: job.offset,
             });
+        } else {
+            discard(removed);
         }
         let asks = *self.ask_mut(job.permanent);
-        self.message = Some(delete_message(
-            job.permanent,
-            gone,
-            total,
-            undoable,
-            asks,
-            &result.result,
-        ));
+        let text = delete_message(job.permanent, gone, total, undoable, asks, &result.result);
+        self.show_delete_message(text, result.result.is_err());
+    }
+
+    /// Shows the end of a delete. An error stays when a later job ends
+    /// before the user has seen it.
+    fn show_delete_message(&mut self, text: String, is_error: bool) {
+        let old = self.message.take().filter(|_| self.message_is_error);
+        (self.message, self.message_is_error) = match (old, is_error) {
+            (Some(old), _) => (Some(format!("{old} {text}")), true),
+            (None, _) => (Some(text), is_error),
+        };
     }
 
     /// Lists rows again that the delete did not remove, in `folder`. A
@@ -460,6 +493,7 @@ impl Browser {
     /// open folder and the cursor are found again by name.
     fn restore_rows(&mut self, folder: &Path, back: Vec<Survivor>) {
         let Some(target) = self.stack_for(folder) else {
+            discard(back);
             return;
         };
         let here = self.current_path();
@@ -467,6 +501,7 @@ impl Browser {
         for ((name, mut entry), fresh) in back {
             // A new item with the same name may exist now. Keep it.
             if dir.find(&name).is_some() {
+                discard((entry, fresh));
                 continue;
             }
             entry.flags &= !flag::SELECTED;
@@ -476,6 +511,7 @@ impl Browser {
                 let e = &mut dir.entries[i];
                 e.flags &= !(flag::SUB_ERROR | flag::ERROR);
                 (e.disk, e.apparent) = (0, 0);
+                discard(e.dir.take());
                 dir.attach(i, sub, 0);
             }
         }
@@ -513,7 +549,20 @@ impl Browser {
     }
 
     fn handle(&mut self, key: KeyEvent) -> Action {
-        self.message = None;
+        let moves = matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j' | 'k')
+        );
+        if !(self.message_is_error && moves && matches!(self.mode, Mode::Browse)) {
+            self.message = None;
+            self.message_is_error = false;
+        }
         match self.mode {
             Mode::Help => {
                 match key.code {
@@ -707,7 +756,16 @@ impl Browser {
             self.mode = Mode::Confirm { permanent, targets };
             Action::None
         } else {
-            Action::Delete { permanent, targets }
+            let now = (self.clock)();
+            let repeat = self.last_quick_delete.is_some_and(|(was, at)| {
+                was == permanent && now.saturating_duration_since(at) < REPEAT_GUARD
+            });
+            self.last_quick_delete = Some((permanent, now));
+            if repeat {
+                Action::None
+            } else {
+                Action::Delete { permanent, targets }
+            }
         }
     }
 
@@ -1414,33 +1472,42 @@ mod tests {
     }
 
     #[test]
-    fn two_deletes_in_two_folders_keep_the_view_and_the_undo_order() {
+    fn three_deletes_in_two_folders_keep_the_view_and_the_undo_order() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = ["A/a1", "A/a2", "B/b1", "B/b2"];
-        let (mut b, gate, _) = gated_browser(tmp.path(), &files, remove);
+        let busy = |p: &Path| match file_name(p) {
+            "b2" => Err("busy".to_string()),
+            _ => remove(p),
+        };
+        let files = ["A/a1", "A/a2", "B/b1", "B/b2", "B/b3"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, busy);
         go_to(&mut b, "A");
         point_at(&mut b, "a1");
         press(&mut b, "dy");
         press(&mut b, "h");
         go_to(&mut b, "B");
         press(&mut b, "s");
+        point_at(&mut b, "b3");
+        press(&mut b, "dy");
         point_at(&mut b, "b2");
         press(&mut b, "dy");
+        point_at(&mut b, "b1");
         let (stack, here) = (b.stack.clone(), name_at_cursor(&b).to_vec());
         assert_eq!(
             b.status().unwrap(),
-            "Moving 1 item to the Trash … 1 more queued"
+            "Moving 1 item to the Trash … 2 more queued"
         );
-        gate.send(()).unwrap();
-        gate.send(()).unwrap();
+        for _ in 0..3 {
+            gate.send(()).unwrap();
+        }
         wait(&mut b, |b| b.pending.is_empty());
         assert_eq!(
             (b.stack.clone(), name_at_cursor(&b).to_vec()),
             (stack, here)
         );
+        assert_eq!(names(&b).len(), 2, "b2 came back");
         assert_eq!(b.undo.len(), 2);
         assert!(b.undo[0].items[0].original.ends_with("A/a1"));
-        assert!(b.undo[1].items[0].original.ends_with("B/b2"));
+        assert!(b.undo[1].items[0].original.ends_with("B/b3"));
     }
 
     #[test]
@@ -1498,9 +1565,12 @@ mod tests {
             "a1" => Err("busy".to_string()),
             _ => remove(p),
         };
-        let files = ["A/a1", "A/sub/s1", "A/sub/s2", "A/sub/s3"];
+        // By name, a1 sorts before sub, so a sort of the parent after the
+        // put-back would move sub.
+        let files = ["A/sub/s1", "A/sub/s2", "A/sub/s3", "A/a1"];
         let (mut b, gate, _) = gated_browser(tmp.path(), &files, busy);
         go_to(&mut b, "A");
+        assert_eq!(names(&b), ["a1", "sub"]);
         point_at(&mut b, "a1");
         press(&mut b, "dy");
         go_to(&mut b, "sub");
@@ -1511,10 +1581,10 @@ mod tests {
         assert_eq!(b.current_path(), path);
         assert_eq!(name_at_cursor(&b), here);
         assert_eq!(b.stack_for(&path), Some(b.stack.clone()));
-        let a = b.dir().find(b"a1");
-        assert!(a.is_none(), "a1 belongs to the parent folder");
+        assert!(b.dir().find(b"a1").is_none(), "a1 belongs to the parent");
         press(&mut b, "h");
         assert_eq!(names(&b), ["a1", "sub"]);
+        assert_eq!(name_at_cursor(&b), b"sub");
     }
 
     #[test]
@@ -1580,11 +1650,10 @@ mod tests {
         assert!(b.quitting());
         assert_eq!(
             b.status().as_deref(),
-            Some("Finishing 1 delete … press q again to quit now")
+            Some("Finishing 1 delete … press q again to quit now or Esc to stay")
         );
         assert!(!b.saves_cache(Exit::Normal), "the delete has not finished");
         assert!(!b.saves_cache(Exit::Forced));
-        // Other keys do nothing while the quit waits.
         press(&mut b, "j");
         assert!(matches!(b.step(key('q')), Step::Exit(Exit::Forced)));
         gate.send(()).unwrap();
@@ -1618,5 +1687,180 @@ mod tests {
             Some("Moved to the Trash: 1 item. Press u to undo.")
         );
         assert_eq!(b.undo.len(), 2);
+    }
+
+    #[test]
+    fn remove_all_counts_a_missing_path_as_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let paths = [tmp.path().join("missing"), file.clone()];
+        assert_eq!(remove_all(&paths), Ok(()));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_path_that_the_deleter_trashed_is_gone_even_when_the_name_exists_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (kept, other) = (tmp.path().join("kept"), tmp.path().join("other"));
+        std::fs::write(&kept, b"new").unwrap();
+        std::fs::write(&other, b"x").unwrap();
+        let job = Job {
+            paths: vec![kept.clone(), other],
+            dirs: vec![false, false],
+            permanent: false,
+        };
+        let mut deleter: Deleter =
+            Box::new(move |_, _| (vec![trash::Trashed::fake(kept.clone())], Ok(())));
+        let result = run_job(&job, &opts(), &mut deleter);
+        assert!(matches!(result.left[0], Left::Gone));
+        assert!(matches!(result.left[1], Left::Present(None)));
+        assert!(result.changes_tree());
+    }
+
+    #[test]
+    fn a_held_key_cannot_delete_several_rows_without_the_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = ["A/a1", "A/a2", "A/a3", "A/a4"];
+        let (mut b, gate, seen) = gated_browser(tmp.path(), &files, remove);
+        let base = Instant::now();
+        let at = Arc::new(Mutex::new(base));
+        let clock = Arc::clone(&at);
+        b.clock = Box::new(move || *clock.lock().unwrap());
+        (b.ask_trash, b.ask_delete) = (false, false);
+        go_to(&mut b, "A");
+        press(&mut b, "d");
+        *at.lock().unwrap() = base + Duration::from_millis(100);
+        press(&mut b, "dd");
+        assert_eq!(names(&b), ["a2", "a3", "a4"], "repeats are ignored");
+        // D is another key.
+        press(&mut b, "D");
+        assert_eq!(names(&b), ["a3", "a4"]);
+        // The ignored presses did not restart the clock for good.
+        *at.lock().unwrap() = base + Duration::from_millis(900);
+        press(&mut b, "d");
+        assert_eq!(names(&b), ["a4"]);
+        for _ in 0..3 {
+            gate.send(()).unwrap();
+        }
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_footer_shows_the_message_and_the_queue_state_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], remove);
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        press(&mut b, "r");
+        let shown = screen(&mut b);
+        let footer = shown.lines().last().unwrap();
+        assert!(footer.contains("Wait for the delete to finish before a rescan"));
+        assert!(footer.contains("Moving 1 item to the Trash …"));
+        b.message = Some("x".repeat(100));
+        let shown = screen(&mut b);
+        let footer = shown.lines().last().unwrap();
+        assert!(footer.contains('…') && footer.contains("Moving 1 item"));
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn a_delete_error_survives_cursor_keys_and_other_keys_clear_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let busy = |p: &Path| match file_name(p) {
+            "a1" => Err("busy".to_string()),
+            _ => remove(p),
+        };
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2", "A/a3"], busy);
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        point_at(&mut b, "a2");
+        press(&mut b, "dy");
+        gate.send(()).unwrap();
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        let message = b.message.clone().unwrap();
+        assert!(message.contains("Error: busy"));
+        assert!(message.contains("Moved to the Trash: 1 item"), "both texts");
+        press(&mut b, "jk");
+        assert_eq!(b.message.as_ref(), Some(&message));
+        press(&mut b, "s");
+        assert!(b.message.is_none());
+    }
+
+    #[test]
+    fn a_finished_result_that_waits_says_so_instead_of_moving() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2", "A/a3"], |p| {
+            match file_name(p) {
+                "a1" => Err("busy".to_string()),
+                _ => remove(p),
+            }
+        });
+        go_to(&mut b, "A");
+        point_at(&mut b, "a1");
+        press(&mut b, "dy");
+        press(&mut b, "d");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.done.len() == 1);
+        assert_eq!(b.status().as_deref(), Some("Waiting to update the list …"));
+        press(&mut b, "n");
+        wait(&mut b, |b| b.pending.is_empty());
+        assert!(b.status().is_none());
+    }
+
+    #[test]
+    fn esc_cancels_a_quit_that_waits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], remove);
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        press(&mut b, "q");
+        assert!(b.quitting());
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(b.step(esc), Step::Continue));
+        assert!(!b.quitting());
+        assert_eq!(b.status().as_deref(), Some("Moving 1 item to the Trash …"));
+        press(&mut b, "j");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn a_stopped_worker_puts_every_row_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], |_| {
+            panic!("the deleter failed on purpose")
+        });
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        assert_eq!(names(&b), ["a2"]);
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(names(&b), ["a1", "a2"]);
+        assert!(
+            b.message
+                .as_deref()
+                .unwrap()
+                .contains("the delete thread stopped")
+        );
+        assert!(b.undo.is_empty());
+    }
+
+    #[test]
+    fn a_put_back_keeps_a_new_item_with_the_same_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut b = browser_on_disk(tmp.path());
+        let i = b.dir().find(b"middle").unwrap();
+        let taken = b.tree.dir_at_mut(&[]).take(i);
+        b.tree.dir_at_mut(&[]).push(b"middle", Kind::File, 7, 7, 0);
+        b.restore_rows(tmp.path(), vec![(taken, None)]);
+        let dir = b.dir();
+        assert_eq!(dir.entries.len(), 3);
+        let kept = &dir.entries[dir.find(b"middle").unwrap()];
+        assert_eq!(kept.disk, 7, "the new item stays");
     }
 }
