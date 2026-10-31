@@ -223,6 +223,8 @@ fn sweep(handle: &sys::Handle, base: &Path, shared: &Shared) {
         match sys::open_child(handle, name, shared.dev) {
             Ok(child) => {
                 sweep(&child, &path, shared);
+                // Windows cannot remove a folder that this walk still holds open.
+                drop(child);
                 if let Err(e) = sys::rmdir(handle, name)
                     && e.kind() != io::ErrorKind::NotFound
                 {

@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A delete (`d` or `D`) runs in the background. The rows leave the list at once, so you can keep browsing and queue more deletes. `q` waits for the running deletes, and `q` again quits at once. `Esc` stays as it was. `r` and `u` wait until the deletes end. A quick repeat of the same delete key is ignored when the question is off.
-- `D` deletes folders with up to 8 threads. It is about 2.5x faster on Linux, 1.5x on Windows and gains little on macOS. It never follows links and does not enter a folder on another device.
+- `D` deletes folders with 8 threads. It is about 2.5x faster on Linux, 1.5x on Windows and gains little on macOS. It never follows links or junctions, and on macOS and Linux it does not enter a folder on another device.
 
 ## [0.1.0] - 2026-10-10
 
