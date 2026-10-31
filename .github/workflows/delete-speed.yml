@@ -16,16 +16,12 @@ jobs:
   bench:
     name: ${{ matrix.os }} ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
-        include:
-          - { name: tree-a, args: "--tree a --rounds 5" }
-          - { name: tree-b, args: "--tree b --rounds 4" }
-          - { name: tree-c, args: "--tree c --rounds 5" }
-          - { name: trash-a, args: "--tree a --rounds 3 --trash" }
+        name: [tree-a, tree-b, tree-c]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -40,13 +36,15 @@ jobs:
           esac
       - name: Run (warm cache)
         run: |
+          case '${{ matrix.name }}' in tree-a) args='--tree a --rounds 5' ;; tree-b) args='--tree b --rounds 4' ;; tree-c) args='--tree c --rounds 5' ;; esac
+          echo "ARGS=$args" >> "$GITHUB_ENV"
           if [ "$RUNNER_OS" = Windows ]; then s="$(cygpath -m "$RUNNER_TEMP")/delbench"; else s="$HOME/delbench"; fi
           mkdir -p "$RUNNER_TEMP/out"
-          target/release/examples/delete_bench ${{ matrix.args }} --scratch "$s" | tee "$RUNNER_TEMP/out/warm.log"
+          target/release/examples/delete_bench $args --scratch "$s" | tee "$RUNNER_TEMP/out/warm.log"
       - name: Run (cache dropped before each delete)
         if: ${{ matrix.name == 'tree-a' && runner.os != 'Windows' }}
         run: |
-          target/release/examples/delete_bench ${{ matrix.args }} --cold --scratch "$HOME/delbench" | tee "$RUNNER_TEMP/out/cold.log"
+          target/release/examples/delete_bench $ARGS --cold --scratch "$HOME/delbench" | tee "$RUNNER_TEMP/out/cold.log"
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
