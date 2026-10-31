@@ -773,6 +773,13 @@ fn main() {
         m("cmd rd /s /q", Box::new(time_cmd_rd));
     }
 
+    // BENCH_METHODS=baseline,t=8 keeps only the methods whose name holds one
+    // of the parts, so a local run stays short.
+    if let Ok(only) = std::env::var("BENCH_METHODS") {
+        let parts: Vec<&str> = only.split(',').filter(|p| !p.is_empty()).collect();
+        methods.retain(|(name, _)| parts.iter().any(|p| name.contains(p)));
+    }
+
     let mut rows: Vec<Row> = Vec::new();
     let mut skip: Vec<String> = Vec::new();
     for round in 0..rounds {
