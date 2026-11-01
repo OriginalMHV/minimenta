@@ -23,7 +23,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -49,11 +49,14 @@ struct Listing {
 /// All entries that can go are removed, also after an error. The first error is
 /// returned at the end. Its message starts with the path of the failed entry
 /// relative to `path`.
-pub fn remove_tree(path: &Path) -> io::Result<()> {
+///
+/// Adds one to `removed` for every file, link and folder that goes, so another
+/// thread can show the progress.
+pub fn remove_tree_counted(path: &Path, removed: &Arc<AtomicU64>) -> io::Result<()> {
     let pool = pool()?;
     let (parent, name) = sys::open_parent(path)?;
     let (handle, dev) = sys::open_root(&parent, &name)?;
-    let shared = Arc::new(Shared::new(dev));
+    let shared = Arc::new(Shared::new(dev, removed.clone()));
     let root = Arc::new(Node {
         handle,
         name,
@@ -95,14 +98,22 @@ struct Shared {
     dev: sys::Dev,
     failed: AtomicBool,
     first_error: Mutex<Option<io::Error>>,
+    removed: Arc<AtomicU64>,
 }
 
 impl Shared {
-    fn new(dev: sys::Dev) -> Self {
+    fn new(dev: sys::Dev, removed: Arc<AtomicU64>) -> Self {
         Self {
             dev,
+            removed,
             failed: AtomicBool::new(false),
             first_error: Mutex::new(None),
+        }
+    }
+
+    fn count(&self, n: u64) {
+        if n > 0 {
+            self.removed.fetch_add(n, Ordering::Relaxed);
         }
     }
 
@@ -173,7 +184,7 @@ fn finish(parent: &sys::Handle, node: &Node) {
     // Windows cannot remove a folder that this walk still holds open.
     sys::release(&node.handle);
     match sys::rmdir(parent, &node.name) {
-        Ok(()) => {}
+        Ok(()) => node.shared.count(1),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         // An earlier error explains why the folder is not empty.
         Err(e) if sys::not_empty(&e) && node.shared.failed.load(Ordering::Relaxed) => {}
@@ -196,10 +207,10 @@ fn finish(parent: &sys::Handle, node: &Node) {
                 std::thread::sleep(Duration::from_millis(delay));
                 result = sys::rmdir(parent, &node.name);
             }
-            if let Err(e) = result
-                && e.kind() != io::ErrorKind::NotFound
-            {
-                node.shared.fail(|| node.path(), e);
+            match result {
+                Ok(()) => node.shared.count(1),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => node.shared.fail(|| node.path(), e),
             }
         }
         Err(e) => node.shared.fail(|| node.path(), e),
@@ -215,9 +226,12 @@ fn sweep(handle: &sys::Handle, base: &Path, shared: &Shared) {
             return;
         }
     };
-    for name in &listing.files {
-        unlink(handle, name, || base.join(sys::os_name(name)), shared);
-    }
+    let files = listing
+        .files
+        .iter()
+        .filter(|name| unlink(handle, name, || base.join(sys::os_name(name)), shared))
+        .count();
+    shared.count(files as u64);
     for name in &listing.dirs {
         let path = base.join(sys::os_name(name));
         match sys::open_child(handle, name, shared.dev) {
@@ -225,10 +239,10 @@ fn sweep(handle: &sys::Handle, base: &Path, shared: &Shared) {
                 sweep(&child, &path, shared);
                 // Windows cannot remove a folder that this walk still holds open.
                 drop(child);
-                if let Err(e) = sys::rmdir(handle, name)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    shared.fail(|| path, e);
+                match sys::rmdir(handle, name) {
+                    Ok(()) => shared.count(1),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => shared.fail(|| path, e),
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -237,11 +251,21 @@ fn sweep(handle: &sys::Handle, base: &Path, shared: &Shared) {
     }
 }
 
-fn unlink(handle: &sys::Handle, name: &sys::Name, path: impl FnOnce() -> PathBuf, shared: &Shared) {
-    if let Err(e) = sys::unlink(handle, name)
-        && e.kind() != io::ErrorKind::NotFound
-    {
-        shared.fail(path, e);
+/// Returns whether this call removed the entry. The caller counts it.
+fn unlink(
+    handle: &sys::Handle,
+    name: &sys::Name,
+    path: impl FnOnce() -> PathBuf,
+    shared: &Shared,
+) -> bool {
+    match sys::unlink(handle, name) {
+        Ok(()) => true,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                shared.fail(path, e);
+            }
+            false
+        }
     }
 }
 
@@ -259,10 +283,13 @@ fn run_dir(scope: &rayon::Scope<'_>, node: &Arc<Node>) {
         // folders does not hold one descriptor for each of them.
         scope.spawn(move |scope| open_and_run(scope, parent, name));
     }
+    // One counter update for each chunk keeps the threads off the same cache line.
     let remove = |chunk: &[sys::Name]| {
-        for name in chunk {
-            unlink(&node.handle, name, || node.child_path(name), &node.shared);
-        }
+        let removed = chunk
+            .iter()
+            .filter(|name| unlink(&node.handle, name, || node.child_path(name), &node.shared))
+            .count();
+        node.shared.count(removed as u64);
     };
     if listing.files.len() > CHUNK {
         listing.files.par_chunks(CHUNK).for_each(remove);
@@ -654,6 +681,10 @@ mod tests {
 
     use super::*;
 
+    fn remove_tree(path: &Path) -> io::Result<()> {
+        remove_tree_counted(path, &Arc::default())
+    }
+
     fn tree_of(files_per_dir: usize, width: usize, depth: usize, root: &Path) {
         fs::create_dir_all(root).unwrap();
         for f in 0..files_per_dir {
@@ -679,6 +710,21 @@ mod tests {
         fs::remove_dir_all(&theirs).unwrap();
         assert!(!ours.exists());
         assert!(!theirs.exists());
+    }
+
+    #[test]
+    fn the_counter_equals_the_number_of_removed_files_and_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("counted");
+        tree_of(3, 2, 2, &root);
+        fs::create_dir(root.join("empty")).unwrap();
+        fs::write(root.join("d0").join("big"), vec![b'y'; 1 << 20]).unwrap();
+        // 1 + 2 + 4 folders, 3 files in each of them, one empty folder, one big file.
+        let expected = 7 + 7 * 3 + 1 + 1;
+        let counter = Arc::new(AtomicU64::new(0));
+        remove_tree_counted(&root, &counter).unwrap();
+        assert!(!root.exists());
+        assert_eq!(counter.load(Ordering::Relaxed), expected);
     }
 
     #[test]
@@ -836,7 +882,7 @@ mod tests {
 
         let (parent, name) = sys::open_parent(&root).unwrap();
         let (handle, dev) = sys::open_root(&parent, &name).unwrap();
-        let shared = Arc::new(Shared::new(dev));
+        let shared = Arc::new(Shared::new(dev, Arc::default()));
         let node = Node {
             handle,
             name,

@@ -206,7 +206,7 @@ fn message_and_status(message: &str, status: &str, width: usize) -> String {
 }
 
 fn footer_line(b: &Browser, width: usize) -> Line<'static> {
-    let status = b.status();
+    let status = b.status(width);
     let message = if b.quitting() {
         None
     } else {

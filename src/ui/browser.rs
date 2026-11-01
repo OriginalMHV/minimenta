@@ -1,6 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,6 +10,7 @@ use std::time::{Duration, Instant};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::job_progress::{self, JobProgress, Queue};
 use super::progress::{self, Outcome};
 use super::{trash, view};
 use crate::cache::{self, Header, Source};
@@ -98,13 +101,14 @@ enum Exit {
 type Deleted = (Vec<trash::Trashed>, Result<(), String>);
 
 /// Moves or removes paths. Real code uses the Trash or `remove_all`, tests
-/// pass a fake.
-type Deleter = Box<dyn FnMut(&[PathBuf], bool) -> Deleted + Send>;
+/// pass a fake. A permanent delete adds one to the counter for each item it
+/// removes.
+type Deleter = Box<dyn FnMut(&[PathBuf], bool, &Arc<AtomicU64>) -> Deleted + Send>;
 
 fn real_deleter() -> Deleter {
-    Box::new(|paths, permanent| {
+    Box::new(|paths, permanent, removed| {
         if permanent {
-            (Vec::new(), remove_all(paths))
+            (Vec::new(), remove_all(paths, removed))
         } else {
             trash::move_to_trash(paths)
         }
@@ -118,6 +122,7 @@ struct Job {
     /// Whether each path was a directory, so a survivor is scanned again.
     dirs: Vec<bool>,
     permanent: bool,
+    removed: Arc<AtomicU64>,
 }
 
 /// A taken row that is still on disk, with the fresh listing of a directory.
@@ -150,6 +155,7 @@ struct Pending {
     taken: Vec<(Vec<u8>, Entry)>,
     permanent: bool,
     offset: usize,
+    progress: JobProgress,
 }
 
 /// One thread runs the jobs in order, so deletes keep their order and
@@ -175,7 +181,7 @@ impl Worker {
 }
 
 fn run_job(job: &Job, opts: &Options, deleter: &mut Deleter) -> JobResult {
-    let (trashed, result) = deleter(&job.paths, job.permanent);
+    let (trashed, result) = deleter(&job.paths, job.permanent, &job.removed);
     let left = job
         .paths
         .iter()
@@ -296,8 +302,9 @@ impl Browser {
         self.quitting
     }
 
-    /// The state of the delete queue, shown while the user browses.
-    pub fn status(&self) -> Option<String> {
+    /// The state of the delete queue, shown while the user browses. The text
+    /// fits `width` columns, and it leaves room for a short message.
+    pub fn status(&self, width: usize) -> Option<String> {
         let first = self.pending.front()?;
         if self.quitting {
             let n = self.pending.len();
@@ -309,16 +316,60 @@ impl Browser {
         if !self.done.is_empty() {
             return Some("Waiting to update the list …".into());
         }
-        let items = count(first.paths.len());
-        let mut text = if first.permanent {
-            format!("Deleting {items} …")
-        } else {
-            format!("Moving {items} to the Trash …")
+        let now = (self.clock)();
+        let queue = (self.pending.len() > 1).then(|| self.queue());
+        let progress = &first.progress;
+        let Some(total) = progress.total().filter(|_| first.permanent) else {
+            let elapsed = progress.elapsed(now);
+            return Some(job_progress::trashing_text(
+                &count(first.paths.len()),
+                elapsed,
+                queue.as_ref(),
+            ));
         };
-        if self.pending.len() > 1 {
-            text = format!("{text} {} more queued", self.pending.len() - 1);
+        let mut budget = width.saturating_sub(1);
+        if self.message.is_some() {
+            // The separator and a message of 12 columns.
+            budget = budget.saturating_sub(5 + 12);
         }
-        Some(text)
+        let label = match first.paths.as_slice() {
+            [one] => one
+                .file_name()
+                .map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into()),
+            many => count(many.len()),
+        };
+        Some(job_progress::deleting_text(
+            &label,
+            progress.removed(),
+            total,
+            progress.time_left(now),
+            queue.as_ref(),
+            budget,
+        ))
+    }
+
+    /// The jobs behind the running one. The item count shows only when each
+    /// of them is a permanent delete with a known total.
+    fn queue(&self) -> Queue {
+        let waiting = self.pending.iter().skip(1);
+        let items = waiting
+            .clone()
+            .map(|p| p.progress.total().filter(|_| p.permanent))
+            .sum::<Option<u64>>();
+        Queue {
+            jobs: waiting.count(),
+            items,
+        }
+    }
+
+    /// Starts the clock of the job that the worker runs now and measures
+    /// its pace. The worker runs the first job that has no result yet.
+    fn tick(&mut self) {
+        let now = (self.clock)();
+        if let Some(running) = self.pending.get_mut(self.done.len()) {
+            running.progress.start(now);
+            running.progress.sample(now);
+        }
     }
 
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
@@ -393,6 +444,7 @@ impl Browser {
             let job = self.pending.pop_front().expect("a result has a job");
             self.apply(job, result);
         }
+        self.tick();
     }
 
     /// The worker thread ended, so no result will come. Puts every row back.
@@ -427,6 +479,7 @@ impl Browser {
             .iter()
             .map(|&i| dir.entries[i].dir.is_some())
             .collect();
+        let total = permanent.then(|| targets.iter().map(|&i| dir.entries[i].items).sum());
         let dir = self.tree.dir_at_mut(&self.stack);
         // From the end, so the indices that are left stay true.
         let mut taken: Vec<_> = targets.iter().rev().map(|&i| dir.take(i)).collect();
@@ -435,18 +488,23 @@ impl Browser {
         self.clear_selection();
         self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
         self.resort();
+        let progress = JobProgress::new(total, (self.clock)());
+        let removed = Arc::clone(&progress.removed);
         self.pending.push_back(Pending {
             folder,
             paths: paths.clone(),
             taken,
             permanent,
             offset: self.offset,
+            progress,
         });
+        self.tick();
         // A failed send means the worker stopped. `poll_jobs` finds out.
         let _ = self.worker.jobs.send(Job {
             paths,
             dirs,
             permanent,
+            removed,
         });
     }
 
@@ -1014,14 +1072,16 @@ fn count(n: usize) -> String {
     }
 }
 
-fn remove_all(paths: &[PathBuf]) -> Result<(), String> {
+fn remove_all(paths: &[PathBuf], removed: &Arc<AtomicU64>) -> Result<(), String> {
     let mut first_error = None;
     for path in paths {
         let is_dir = path.symlink_metadata().is_ok_and(|m| m.is_dir());
         let result = if is_dir {
-            crate::delete::remove_tree(path)
+            crate::delete::remove_tree_counted(path, removed)
         } else {
-            std::fs::remove_file(path)
+            std::fs::remove_file(path).inspect(|()| {
+                removed.fetch_add(1, Ordering::Relaxed);
+            })
         };
         // A path that is gone already is what the user wants.
         if let Err(e) = result
@@ -1370,7 +1430,7 @@ mod tests {
         act: impl Fn(&Path) -> Result<(), String> + Send + 'static,
     ) -> Deleter {
         let seen = Arc::clone(seen);
-        Box::new(move |paths, permanent| {
+        Box::new(move |paths, permanent, _| {
             let _ = gate.recv();
             seen.lock().unwrap().push(paths.to_vec());
             let mut first = None;
@@ -1477,11 +1537,17 @@ mod tests {
         assert_eq!(names(&b), ["a1", "a3"]);
         assert!(b.dir().totals().items < before.items);
         assert!(b.dir().totals().disk < before.disk);
-        assert_eq!(b.status().as_deref(), Some("Moving 1 item to the Trash …"));
+        assert_eq!(
+            b.status(80).as_deref(),
+            Some("Moving 1 item to the Trash …")
+        );
         press(&mut b, "jk");
         assert_eq!(name_at_cursor(&b), b"a1");
         assert!(b.message.is_none());
-        assert!(b.status().is_some(), "the queue state outlives key presses");
+        assert!(
+            b.status(80).is_some(),
+            "the queue state outlives key presses"
+        );
         assert!(tmp.path().join("A/a2").exists(), "the job has not run");
         gate.send(()).unwrap();
         wait(&mut b, |b| b.pending.is_empty());
@@ -1491,7 +1557,7 @@ mod tests {
             Some("Moved to the Trash: 1 item. Press u to undo.")
         );
         assert_eq!(b.undo.len(), 1);
-        assert!(b.status().is_none());
+        assert!(b.status(80).is_none());
     }
 
     #[test]
@@ -1516,7 +1582,7 @@ mod tests {
         point_at(&mut b, "b1");
         let (stack, here) = (b.stack.clone(), name_at_cursor(&b).to_vec());
         assert_eq!(
-            b.status().unwrap(),
+            b.status(80).unwrap(),
             "Moving 1 item to the Trash … 2 more queued"
         );
         for _ in 0..3 {
@@ -1672,7 +1738,7 @@ mod tests {
         press(&mut b, "q");
         assert!(b.quitting());
         assert_eq!(
-            b.status().as_deref(),
+            b.status(80).as_deref(),
             Some("Finishing 1 delete … press q again to quit now or Esc to stay")
         );
         assert!(!b.saves_cache(Exit::Normal), "the delete has not finished");
@@ -1718,7 +1784,7 @@ mod tests {
         let file = tmp.path().join("file");
         std::fs::write(&file, b"x").unwrap();
         let paths = [tmp.path().join("missing"), file.clone()];
-        assert_eq!(remove_all(&paths), Ok(()));
+        assert_eq!(remove_all(&paths, &Arc::default()), Ok(()));
         assert!(!file.exists());
     }
 
@@ -1731,7 +1797,10 @@ mod tests {
         std::fs::write(target.join("keep"), b"x").unwrap();
         let link = tmp.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert_eq!(remove_all(std::slice::from_ref(&link)), Ok(()));
+        assert_eq!(
+            remove_all(std::slice::from_ref(&link), &Arc::default()),
+            Ok(())
+        );
         assert!(link.symlink_metadata().is_err());
         assert!(target.join("keep").exists());
     }
@@ -1742,7 +1811,10 @@ mod tests {
         let dir = tmp.path().join("dir");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("file"), b"x").unwrap();
-        assert_eq!(remove_all(std::slice::from_ref(&dir)), Ok(()));
+        assert_eq!(
+            remove_all(std::slice::from_ref(&dir), &Arc::default()),
+            Ok(())
+        );
         assert!(!dir.exists());
     }
 
@@ -1756,9 +1828,10 @@ mod tests {
             paths: vec![kept.clone(), other],
             dirs: vec![false, false],
             permanent: false,
+            removed: Arc::default(),
         };
         let mut deleter: Deleter =
-            Box::new(move |_, _| (vec![trash::Trashed::fake(kept.clone())], Ok(())));
+            Box::new(move |_, _, _| (vec![trash::Trashed::fake(kept.clone())], Ok(())));
         let result = run_job(&job, &opts(), &mut deleter);
         assert!(matches!(result.left[0], Left::Gone));
         assert!(matches!(result.left[1], Left::Present(None)));
@@ -1815,6 +1888,122 @@ mod tests {
         }
         let len = b.message.as_ref().unwrap().chars().count();
         assert!(len <= MAX_ERROR_CHARS);
+    }
+
+    /// A browser with a fake clock that the test moves.
+    fn with_clock(b: &mut Browser) -> impl Fn(u64) + use<> {
+        let base = Instant::now();
+        let at = Arc::new(Mutex::new(base));
+        let clock = Arc::clone(&at);
+        b.clock = Box::new(move || *clock.lock().unwrap());
+        move |ms| *at.lock().unwrap() = base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_permanent_delete_shows_counts_percent_and_time_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = ["A/a1", "A/a2", "A/a3", "top", "z1", "z2"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        point_at(&mut b, "A");
+        press(&mut b, "Dy");
+        assert_eq!(
+            b.status(200).as_deref(),
+            Some("Deleting A: 0% done (0 of 4 items)")
+        );
+        b.pending[0].progress.removed.store(2, Ordering::Relaxed);
+        set_time(500);
+        b.tick();
+        assert_eq!(
+            b.status(200).as_deref(),
+            Some("Deleting A: 50% done (2 of 4 items)"),
+            "no time before one second"
+        );
+        set_time(4000);
+        assert_eq!(
+            b.status(200).as_deref(),
+            Some("Deleting A: 50% done, less than 5 s left (2 of 4 items)")
+        );
+        point_at(&mut b, "top");
+        press(&mut b, "Dy");
+        assert_eq!(
+            b.status(200).as_deref(),
+            Some(
+                "Deleting A: 50% done, less than 5 s left (2 of 4 items). \
+                 1 more queued (1 item)"
+            )
+        );
+        gate.send(()).unwrap();
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn several_rows_and_a_mixed_queue_show_in_the_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = ["a", "b", "c", "d", "e"];
+        let (mut b, gate, _) = gated_browser(tmp.path(), &files, remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        point_at(&mut b, "a");
+        press(&mut b, "  ");
+        assert_eq!(b.selected().count(), 2);
+        press(&mut b, "Dy");
+        press(&mut b, "dy");
+        press(&mut b, "Dy");
+        assert_eq!(
+            b.status(200).as_deref(),
+            Some("Deleting 2 items: 0% done (0 of 2 items). 2 more queued")
+        );
+        for _ in 0..3 {
+            gate.send(()).unwrap();
+        }
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn a_trash_move_shows_the_elapsed_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["A/a1", "A/a2"], remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        go_to(&mut b, "A");
+        press(&mut b, "dy");
+        assert_eq!(
+            b.status(80).as_deref(),
+            Some("Moving 1 item to the Trash …")
+        );
+        set_time(4200);
+        assert_eq!(
+            b.status(80).as_deref(),
+            Some("Moving 1 item to the Trash … 4 s")
+        );
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn the_footer_keeps_percent_and_time_left_on_80_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "a-long-folder-name-that-needs-room-in-the-footer/f1";
+        let (mut b, gate, _) = gated_browser(tmp.path(), &[long, "z"], remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        point_at(&mut b, "a-long-folder-name-that-needs-room-in-the-footer");
+        press(&mut b, "Dy");
+        press(&mut b, "dy");
+        b.pending[0].progress.removed.store(1, Ordering::Relaxed);
+        set_time(3000);
+        b.message = Some("Deleted 1 item.".into());
+        let shown = screen(&mut b);
+        let footer = shown.lines().last().unwrap();
+        assert!(footer.chars().count() <= 80, "{footer}");
+        assert!(footer.contains("50% done, less than 5 s left"), "{footer}");
+        assert!(footer.contains("Deleted 1 i"), "{footer}");
+        gate.send(()).unwrap();
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
     }
 
     #[test]
@@ -1876,10 +2065,13 @@ mod tests {
         press(&mut b, "d");
         gate.send(()).unwrap();
         wait(&mut b, |b| b.done.len() == 1);
-        assert_eq!(b.status().as_deref(), Some("Waiting to update the list …"));
+        assert_eq!(
+            b.status(80).as_deref(),
+            Some("Waiting to update the list …")
+        );
         press(&mut b, "n");
         wait(&mut b, |b| b.pending.is_empty());
-        assert!(b.status().is_none());
+        assert!(b.status(80).is_none());
     }
 
     #[test]
@@ -1893,7 +2085,10 @@ mod tests {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(b.step(esc), Step::Continue));
         assert!(!b.quitting());
-        assert_eq!(b.status().as_deref(), Some("Moving 1 item to the Trash …"));
+        assert_eq!(
+            b.status(80).as_deref(),
+            Some("Moving 1 item to the Trash …")
+        );
         press(&mut b, "j");
         gate.send(()).unwrap();
         wait(&mut b, |b| b.pending.is_empty());
