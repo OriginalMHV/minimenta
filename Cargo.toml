@@ -1,6 +1,6 @@
 [package]
 name = "minimenta"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # 1.88 is the oldest Rust that builds minimenta. ratatui 0.30, the let chains
 # and `slice::as_chunks` need it.

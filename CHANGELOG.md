@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
 ### Added
 
 - Search with `/`. It reads the scan in memory and runs while you type. Words can be a name, a pattern like `*.log`, a path like `cache/`, `size>1G`, `type:dir` and `-word`. Ready-made searches find build folders that grow large: `@node`, `@rust`, `@gradle`, `@python`, `@xcode`, `@cache` and `@dev`. Each result shows its path below the open folder. You can select results and delete them with `d` or `D`.
@@ -56,5 +58,6 @@ The Changed and Fixed lists describe changes since earlier builds from the main 
 - macOS: the progress screen says when minimenta checks the cache. Before, it showed 0 items and 0 B while minimenta read the cache and FSEvents replayed the changes. The replay can take up to half the time of the last full scan. For a home folder with a full scan of 35 s, that is up to 17 s. During the replay, the Time line shows the latest time at which the replay stops. That time includes the time to read the cache. If minimenta cannot use the cache, the screen says that it scans all folders again, and the counters start from 0. Before, the counters counted some folders twice when the check had listed them before it stopped.
 - macOS: a scan that crosses firmlinks counts the data volume once. Before, a scan of `/` counted every file behind a firmlink such as `/Users` twice, and `-x` followed the firmlinks into the data volume. Now `/System/Volumes/Data/Users` shows `>` and its contents show at `/Users`. With `-x`, a firmlink counts as a mount point. A rescan with `r` and the cache follow the same rule. A scan of `/` is shorter and shows a lower total, because it does less work. This is a correction and not a faster scanner.
 
-[Unreleased]: https://github.com/OriginalMHV/minimenta/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/OriginalMHV/minimenta/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OriginalMHV/minimenta/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OriginalMHV/minimenta/releases/tag/v0.1.0
