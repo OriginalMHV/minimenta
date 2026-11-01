@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A delete (`d` or `D`) runs in the background. The rows leave the list at once, so you can keep browsing and queue more deletes. `q` waits for the running deletes, and `q` again quits at once. `Esc` stays as it was. `r` and `u` wait until the deletes end. A quick repeat of the same delete key is ignored when the question is off.
 - `D` deletes folders with 8 threads. It is about 2.5x faster on Linux, 1.5x on Windows and gains little on macOS. It never follows links or junctions, and on macOS and Linux it does not enter a folder on another device.
+- While a delete runs, the footer shows its progress. For `D` it shows the items removed, the percent and the time left, for example `Deleting big: 21% done, about 40 s left (21,340 of 100,000 items). 2 more queued (45,000 items)`. For `d` it shows how long the move to the Trash has run. The time left shows after about a second. When the count stops for 3 s, the footer says `waiting for the disk`. The text changes while you wait, with no key press.
 
 ## [0.1.0] - 2026-10-10
 
