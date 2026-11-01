@@ -2204,21 +2204,22 @@ mod tests {
         b.message = None;
         fake_free(&mut b);
         let free = "182.3 GiB free  1/2 ";
+        // The disk usage of the two files depends on the file system, for
+        // example 8.0 KiB on APFS and 12.0 KiB on ext4.
+        let disk = crate::tree::format_size(b.dir().totals().disk);
+        let total = format!(" Total disk usage: {}", disk.trim_start());
         let cases = [
             (
                 120,
-                " Total disk usage: 8.0 KiB  Apparent size: 2.9 KiB  Items: 2   |  Sorted by name",
+                format!("{total}  Apparent size: 2.9 KiB  Items: 2   |  Sorted by name"),
             ),
-            (
-                100,
-                " Total disk usage: 8.0 KiB  Apparent size: 2.9 KiB  Items: 2",
-            ),
-            (80, " Total disk usage: 8.0 KiB  Items: 2"),
-            (60, " Total disk usage: 8.0 KiB  Items: 2"),
-            (50, " Total disk usage: 8.0 KiB"),
+            (100, format!("{total}  Apparent size: 2.9 KiB  Items: 2")),
+            (80, format!("{total}  Items: 2")),
+            (60, format!("{total}  Items: 2")),
+            (50, total.clone()),
         ];
         for (width, left) in cases {
-            assert_eq!(footer_at(&mut b, width), aligned(left, free, width));
+            assert_eq!(footer_at(&mut b, width), aligned(&left, free, width));
         }
         let footer = footer_at(&mut b, 40);
         assert!(!footer.contains("free"), "{footer}");
