@@ -192,13 +192,20 @@ fn tail(text: &str, max: usize) -> String {
     format!("…{}", text.chars().skip(len - keep).collect::<String>())
 }
 
+/// Between the message and the queue state in the footer.
+pub const STATUS_SEP: &str = "  |  ";
+/// A message gets at least this many columns. With less room, the status
+/// takes the line and the message is not cut. `Browser::status` keeps this
+/// room free for the message.
+pub const MIN_MESSAGE: usize = 12;
+
 /// The message first, then the queue state. A long message is cut with `…`
 /// so the queue state stays on the line.
 fn message_and_status(message: &str, status: &str, width: usize) -> String {
-    const SEP: &str = "  |  ";
+    const SEP: &str = STATUS_SEP;
     let room = width.saturating_sub(1 + SEP.len() + status.chars().count());
     let len = message.chars().count();
-    if len <= room || room < 12 {
+    if len <= room || room < MIN_MESSAGE {
         return format!("{message}{SEP}{status}");
     }
     let cut: String = message.chars().take(room - 1).collect();

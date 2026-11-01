@@ -14,6 +14,23 @@ const ETA_AFTER: Duration = Duration::from_secs(1);
 const ETA_MIN_PERCENT: u64 = 2;
 /// Weight of the newest rate sample against the older rate.
 const NEW_RATE: f64 = 0.4;
+/// The counter has not moved for this long: the disk or a scanner stalls.
+const STALLED_AFTER: Duration = Duration::from_secs(3);
+/// A longer estimate is not worth showing.
+const MAX_LEFT: Duration = Duration::from_secs(24 * 3600);
+/// The shown rate drops only when the new rate is this much lower ...
+const SLOWER_BY: f64 = 0.8;
+/// ... for this many samples in a row. A faster rate shows at once.
+const SLOW_SAMPLES: u8 = 2;
+
+/// What the footer says about the time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Left {
+    Unknown,
+    /// The counter is flat, so no estimate is honest.
+    Waiting,
+    In(Duration),
+}
 
 /// The UI side of the progress of one job.
 pub struct JobProgress {
@@ -23,8 +40,15 @@ pub struct JobProgress {
     started: Option<Instant>,
     last_at: Instant,
     last_removed: u64,
-    /// Items per second, smoothed over the samples.
+    /// Items per second, smoothed over the samples. A flat sample does not
+    /// change it.
     rate: Option<f64>,
+    /// The rate that the time left uses. It moves less often than `rate`, so
+    /// the text does not flicker.
+    shown_rate: Option<f64>,
+    slow_samples: u8,
+    moved_at: Instant,
+    stalled: bool,
 }
 
 impl JobProgress {
@@ -36,6 +60,10 @@ impl JobProgress {
             last_at: now,
             last_removed: 0,
             rate: None,
+            shown_rate: None,
+            slow_samples: 0,
+            moved_at: now,
+            stalled: false,
         }
     }
 
@@ -52,6 +80,7 @@ impl JobProgress {
         if self.started.is_none() {
             self.started = Some(now);
             self.last_at = now;
+            self.moved_at = now;
         }
     }
 
@@ -69,12 +98,44 @@ impl JobProgress {
             return;
         }
         let removed = self.removed();
-        let seen = removed.saturating_sub(self.last_removed) as f64 / dt.as_secs_f64();
-        self.rate = Some(
-            self.rate
-                .map_or(seen, |r| r * (1.0 - NEW_RATE) + seen * NEW_RATE),
-        );
+        let moved = removed.saturating_sub(self.last_removed);
+        if moved > 0 {
+            let seen = moved as f64 / dt.as_secs_f64();
+            let rate = self
+                .rate
+                .map_or(seen, |r| r * (1.0 - NEW_RATE) + seen * NEW_RATE);
+            self.rate = Some(rate);
+            self.show_rate(rate);
+            self.moved_at = now;
+        }
+        self.stalled = now.saturating_duration_since(self.moved_at) >= STALLED_AFTER
+            && self.total.is_some_and(|t| removed < t);
         (self.last_at, self.last_removed) = (now, removed);
+    }
+
+    fn show_rate(&mut self, rate: f64) {
+        let Some(shown) = self.shown_rate else {
+            self.shown_rate = Some(rate);
+            return;
+        };
+        if rate >= shown {
+            (self.shown_rate, self.slow_samples) = (Some(rate), 0);
+        } else if rate < shown * SLOWER_BY {
+            self.slow_samples += 1;
+            if self.slow_samples >= SLOW_SAMPLES {
+                (self.shown_rate, self.slow_samples) = (Some(rate), 0);
+            }
+        } else {
+            self.slow_samples = 0;
+        }
+    }
+
+    pub fn left(&self, now: Instant) -> Left {
+        if self.stalled {
+            Left::Waiting
+        } else {
+            self.time_left(now).map_or(Left::Unknown, Left::In)
+        }
     }
 
     /// The time left, or None while the guess would be poor.
@@ -86,12 +147,14 @@ impl JobProgress {
             return None;
         }
         let rate = self
-            .rate
+            .shown_rate
             .unwrap_or_else(|| removed as f64 / elapsed.as_secs_f64());
         if rate <= 0.0 {
             return None;
         }
-        Some(Duration::from_secs_f64((total - removed) as f64 / rate))
+        Duration::try_from_secs_f64((total - removed) as f64 / rate)
+            .ok()
+            .filter(|left| *left <= MAX_LEFT)
     }
 }
 
@@ -145,15 +208,15 @@ pub fn elapsed_text(d: Duration) -> String {
 /// A calm estimate: "less than 5 s left", "about 40 s left", "about 2 min left".
 pub fn left_text(d: Duration) -> String {
     let secs = d.as_secs_f64().round() as u64;
-    let near = (secs + 2) / 5 * 5;
+    let near = secs.saturating_add(2) / 5 * 5;
     if secs < 5 {
         "less than 5 s left".into()
     } else if near < 60 {
         format!("about {near} s left")
     } else if secs < 90 * 60 {
-        format!("about {} min left", (secs + 30) / 60)
+        format!("about {} min left", secs.saturating_add(30) / 60)
     } else {
-        format!("about {} h left", (secs + 1800) / 3600)
+        format!("about {} h left", secs.saturating_add(1800) / 3600)
     }
 }
 
@@ -172,14 +235,16 @@ pub fn deleting_text(
     label: &str,
     removed: u64,
     total: u64,
-    left: Option<Duration>,
+    left: Left,
     queue: Option<&Queue>,
     budget: usize,
 ) -> String {
     let removed = removed.min(total);
     let mut head = format!("{}% done", percent(removed, total));
-    if let Some(left) = left {
-        head = format!("{head}, {}", left_text(left));
+    match left {
+        Left::In(left) => head = format!("{head}, {}", left_text(left)),
+        Left::Waiting => head = format!("{head}, waiting for the disk"),
+        Left::Unknown => {}
     }
     let detail = format!(" ({} of {})", thousands(removed), items(total));
     let queued =
@@ -310,6 +375,103 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_counter_never_panics_and_says_it_waits_for_the_disk() {
+        let base = Instant::now();
+        let mut p = running(1000, base);
+        p.removed.store(100, Ordering::Relaxed);
+        p.sample(at(base, 1000));
+        let rate = p.rate;
+        for n in 3..=2000 {
+            p.sample(at(base, n * 500));
+            assert_eq!(p.rate, rate, "a flat sample keeps the rate");
+        }
+        let now = at(base, 1_000_000);
+        assert_eq!(p.left(now), Left::Waiting);
+        let text = deleting_text("big", 100, 1000, p.left(now), None, 200);
+        assert_eq!(
+            text,
+            "Deleting big: 10% done, waiting for the disk (100 of 1,000 items)"
+        );
+        p.removed.store(150, Ordering::Relaxed);
+        p.sample(at(base, 1_000_500));
+        assert!(matches!(p.left(at(base, 1_000_500)), Left::In(_)));
+    }
+
+    #[test]
+    fn a_short_pause_shows_no_waiting_text() {
+        let base = Instant::now();
+        let mut p = running(1000, base);
+        p.removed.store(100, Ordering::Relaxed);
+        p.sample(at(base, 1000));
+        p.sample(at(base, 3900));
+        assert!(matches!(p.left(at(base, 3900)), Left::In(_)));
+        p.sample(at(base, 4500));
+        assert_eq!(p.left(at(base, 4500)), Left::Waiting);
+    }
+
+    #[test]
+    fn a_zero_first_sample_gives_no_rate_and_no_time() {
+        let base = Instant::now();
+        let mut p = running(1000, base);
+        p.sample(at(base, 600));
+        assert_eq!(p.rate, None);
+        assert_eq!(p.left(at(base, 2000)), Left::Unknown);
+    }
+
+    #[test]
+    fn a_huge_total_with_a_tiny_rate_shows_no_time_and_does_not_panic() {
+        let base = Instant::now();
+        let p = running(u64::MAX / 200, base);
+        p.removed.store(u64::MAX / 200 / 10, Ordering::Relaxed);
+        // About 10 items per second against 10^16 to go.
+        assert_eq!(p.time_left(at(base, 1_000_000_000)), None);
+        assert_eq!(
+            left_text(Duration::from_secs(u64::MAX)),
+            "about 5124095576030431 h left"
+        );
+        let mut q = running(1_000_000_000, base);
+        q.removed.store(20_000_000, Ordering::Relaxed);
+        q.sample(at(base, 100_000_000));
+        assert_eq!(q.time_left(at(base, 100_000_000)), None, "over 24 h");
+    }
+
+    #[test]
+    fn the_shown_time_does_not_flicker_on_a_noisy_rate() {
+        let base = Instant::now();
+        let mut p = running(1_000_000, base);
+        let step = |p: &mut JobProgress, ms: u64, removed: u64| {
+            p.removed.store(removed, Ordering::Relaxed);
+            p.sample(at(base, ms));
+            p.shown_rate.unwrap()
+        };
+        let steady = step(&mut p, 500, 1000);
+        // A slightly slower sample (under 20%) does not move the shown rate.
+        assert_eq!(step(&mut p, 1000, 1900), steady);
+        // A faster rate shows at once.
+        assert!(step(&mut p, 1500, 3500) > steady);
+        // A much slower rate shows only after two samples in a row.
+        let fast = p.shown_rate.unwrap();
+        assert_eq!(step(&mut p, 2000, 3510), fast);
+        assert!(step(&mut p, 2500, 3520) < fast);
+    }
+
+    #[test]
+    fn the_time_left_only_falls_while_the_rate_is_steady() {
+        let base = Instant::now();
+        let mut p = running(10_000, base);
+        let mut last = Duration::MAX;
+        for n in 1..=10u64 {
+            let ms = n * 500;
+            p.removed.store(n * 500, Ordering::Relaxed);
+            p.sample(at(base, ms));
+            if let Some(left) = p.time_left(at(base, ms)) {
+                assert!(left <= last, "{left:?} after {last:?}");
+                last = left;
+            }
+        }
+    }
+
+    #[test]
     fn the_time_left_is_rounded_and_calm() {
         assert_eq!(left_text(secs(0)), "less than 5 s left");
         assert_eq!(left_text(secs(4)), "less than 5 s left");
@@ -369,12 +531,19 @@ mod tests {
             items: Some(45_000),
         };
         assert_eq!(
-            deleting_text("big", 21_340, 100_000, Some(secs(38)), Some(&queue), 200),
+            deleting_text(
+                "big",
+                21_340,
+                100_000,
+                Left::In(secs(38)),
+                Some(&queue),
+                200
+            ),
             "Deleting big: 21% done, about 40 s left (21,340 of 100,000 items). \
              2 more queued (45,000 items)"
         );
         assert_eq!(
-            deleting_text("3 items", 0, 50, None, None, 200),
+            deleting_text("3 items", 0, 50, Left::Unknown, None, 200),
             "Deleting 3 items: 0% done (0 of 50 items)"
         );
         let mixed = Queue {
@@ -382,7 +551,7 @@ mod tests {
             items: None,
         };
         assert_eq!(
-            deleting_text("big", 5, 10, None, Some(&mixed), 200),
+            deleting_text("big", 5, 10, Left::Unknown, Some(&mixed), 200),
             "Deleting big: 50% done (5 of 10 items). 1 more queued"
         );
     }
@@ -396,11 +565,18 @@ mod tests {
         let long = "a-very-long-folder-name-that-takes-room-in-the-footer";
         // The browser leaves room for a short message and the separator.
         for budget in [79, 62] {
-            let text = deleting_text(long, 21_340, 100_000, Some(secs(38)), Some(&queue), budget);
+            let text = deleting_text(
+                long,
+                21_340,
+                100_000,
+                Left::In(secs(38)),
+                Some(&queue),
+                budget,
+            );
             assert!(text.chars().count() <= budget, "{text}");
             assert!(text.contains("21% done, about 40 s left"), "{text}");
         }
-        let text = deleting_text("big", 21_340, 100_000, Some(secs(38)), Some(&queue), 62);
+        let text = deleting_text("big", 21_340, 100_000, Left::In(secs(38)), Some(&queue), 62);
         assert_eq!(
             text,
             "Deleting big: 21% done, about 40 s left. 2 more queued"

@@ -329,8 +329,8 @@ impl Browser {
         };
         let mut budget = width.saturating_sub(1);
         if self.message.is_some() {
-            // The separator and a message of 12 columns.
-            budget = budget.saturating_sub(5 + 12);
+            // Must match the room rule in `view::message_and_status`.
+            budget = budget.saturating_sub(view::STATUS_SEP.len() + view::MIN_MESSAGE);
         }
         let label = match first.paths.as_slice() {
             [one] => one
@@ -342,7 +342,7 @@ impl Browser {
             &label,
             progress.removed(),
             total,
-            progress.time_left(now),
+            progress.left(now),
             queue.as_ref(),
             budget,
         ))
@@ -1921,6 +1921,9 @@ mod tests {
             "no time before one second"
         );
         set_time(4000);
+        b.pending[0].progress.removed.store(3, Ordering::Relaxed);
+        b.tick();
+        b.pending[0].progress.removed.store(2, Ordering::Relaxed);
         assert_eq!(
             b.status(200).as_deref(),
             Some("Deleting A: 50% done, less than 5 s left (2 of 4 items)")
