@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::free_space::FreeSpace;
 use super::job_progress::{self, JobProgress, Queue};
 use super::progress::{self, Outcome};
 use super::{trash, view};
 use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
-use crate::tree::{Dir, Entry, Sort, SortKey, Tree, flag, os_name};
+use crate::tree::{Dir, Entry, Sort, SortKey, Tree, flag, format_size, os_name};
 
 pub enum Mode {
     Browse,
@@ -46,6 +47,9 @@ pub struct Browser {
     pub mode: Mode,
     pub message: Option<String>,
     pub list_height: usize,
+    /// The free space of the volume under the open folder. It changes on
+    /// events, not on every redraw.
+    pub free: FreeSpace,
     range: Option<Range>,
     opts: Options,
     /// Set when a rescan or delete corrected the tree, so it is saved on quit.
@@ -273,6 +277,7 @@ impl Browser {
             mode: Mode::Browse,
             message: describe(source),
             list_height: 1,
+            free: FreeSpace::real(),
             range: None,
             opts,
             session,
@@ -289,7 +294,15 @@ impl Browser {
             clock: Box::new(Instant::now),
         };
         browser.apply_sort();
+        browser.refresh_free();
         browser
+    }
+
+    /// Reads the free space of the open folder again.
+    fn refresh_free(&mut self) {
+        let path = self.current_path();
+        let now = (self.clock)();
+        self.free.refresh(&path, now);
     }
 
     /// Whether the tree may be saved. A forced quit can leave rows out of
@@ -445,6 +458,13 @@ impl Browser {
             self.apply(job, result);
         }
         self.tick();
+        // A folder on another volume has other free space. The old value
+        // also ages out while deletes free space.
+        if self.free.is_for_other_folder(&self.current_path())
+            || (!self.pending.is_empty() && self.free.is_old((self.clock)()))
+        {
+            self.refresh_free();
+        }
     }
 
     /// The worker thread ended, so no result will come. Puts every row back.
@@ -521,6 +541,10 @@ impl Browser {
             }
         }
         let gone = removed.len();
+        let freed = job
+            .permanent
+            .then(|| removed.iter().map(|(_, e)| e.counted_disk()).sum::<u64>())
+            .filter(|&bytes| bytes > 0);
         if !back.is_empty() {
             self.restore_rows(&job.folder, back);
         }
@@ -536,8 +560,16 @@ impl Browser {
             discard(removed);
         }
         let asks = *self.ask_mut(job.permanent);
-        let text = delete_message(job.permanent, gone, total, undoable, asks, &result.result);
+        let text = delete_message(
+            job.permanent,
+            (gone, total),
+            freed,
+            undoable,
+            asks,
+            &result.result,
+        );
         self.show_delete_message(text, result.result.is_err());
+        self.refresh_free();
     }
 
     /// Shows the end of a delete. An error stays when a later job ends
@@ -969,6 +1001,7 @@ impl Browser {
                     session.full_scan_at = cache::now();
                 }
                 self.message = Some("Rescanned".into());
+                self.refresh_free();
             }
             Outcome::Failed(e) => self.message = Some(format!("Rescan failed: {e}")),
             Outcome::Cancelled | Outcome::Quit => self.message = Some("Rescan cancelled".into()),
@@ -1033,8 +1066,8 @@ fn set_selected(e: &mut crate::tree::Entry, on: bool) {
 /// last and only without an error, so an error text keeps its place.
 fn delete_message(
     permanent: bool,
-    gone: usize,
-    total: usize,
+    (gone, total): (usize, usize),
+    freed: Option<u64>,
     undoable: bool,
     asks: bool,
     result: &Result<(), String>,
@@ -1045,6 +1078,9 @@ fn delete_message(
         "Moved to the Trash:"
     };
     let undo = if undoable { " Press u to undo." } else { "" };
+    let freed = freed.map_or_else(String::new, |bytes| {
+        format!(" Freed {}.", format_size(bytes).trim_start())
+    });
     match result {
         Ok(()) => {
             let again = if asks {
@@ -1052,9 +1088,9 @@ fn delete_message(
             } else {
                 " Press ? to ask first again."
             };
-            format!("{done} {}.{undo}{again}", count(gone))
+            format!("{done} {}.{freed}{undo}{again}", count(gone))
         }
-        Err(e) => format!("{done} {gone} of {}.{undo} Error: {e}", count(total)),
+        Err(e) => format!("{done} {gone} of {}.{freed}{undo} Error: {e}", count(total)),
     }
 }
 
@@ -1391,15 +1427,15 @@ mod tests {
     #[test]
     fn the_status_line_names_the_help_only_after_a_delete_without_errors() {
         assert_eq!(
-            delete_message(true, 2, 2, false, false, &Ok(())),
+            delete_message(true, (2, 2), None, false, false, &Ok(())),
             "Deleted 2 items. Press ? to ask first again."
         );
         assert_eq!(
-            delete_message(false, 1, 1, true, true, &Ok(())),
+            delete_message(false, (1, 1), None, true, true, &Ok(())),
             "Moved to the Trash: 1 item. Press u to undo."
         );
         assert_eq!(
-            delete_message(true, 1, 2, false, false, &Err("busy".into())),
+            delete_message(true, (1, 2), None, false, false, &Err("busy".into())),
             "Deleted 1 of 2 items. Error: busy"
         );
     }
@@ -2130,5 +2166,269 @@ mod tests {
         assert_eq!(dir.entries.len(), 3);
         let kept = &dir.entries[dir.find(b"middle").unwrap()];
         assert_eq!(kept.disk, 7, "the new item stays");
+    }
+
+    const FREE: u64 = 195_743_134_515;
+
+    /// The footer row of a terminal `width` columns wide.
+    fn footer_at(browser: &mut Browser, width: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| view::draw(frame, browser)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer.content[buffer.content.len() - usize::from(width)..]
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    /// `left` and `right` on one line of `width` columns.
+    fn aligned(left: &str, right: &str, width: u16) -> String {
+        let gap = usize::from(width) - left.chars().count() - right.chars().count();
+        format!("{left}{}{right}", " ".repeat(gap))
+    }
+
+    /// Makes the free space a number that the test controls.
+    fn fake_free(b: &mut Browser) -> Arc<AtomicU64> {
+        let bytes = Arc::new(AtomicU64::new(FREE));
+        let read = Arc::clone(&bytes);
+        b.free = FreeSpace::new(Box::new(move |_| Some(read.load(Ordering::Relaxed))));
+        b.refresh_free();
+        bytes
+    }
+
+    #[test]
+    fn the_footer_shows_the_free_space_before_the_row_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, _, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        b.message = None;
+        fake_free(&mut b);
+        let free = "182.3 GiB free  1/2 ";
+        // The disk usage of the two files depends on the file system, for
+        // example 8.0 KiB on APFS and 12.0 KiB on ext4.
+        let disk = crate::tree::format_size(b.dir().totals().disk);
+        let total = format!(" Total disk usage: {}", disk.trim_start());
+        let cases = [
+            (
+                120,
+                format!("{total}  Apparent size: 2.9 KiB  Items: 2   |  Sorted by name"),
+            ),
+            (100, format!("{total}  Apparent size: 2.9 KiB  Items: 2")),
+            (80, format!("{total}  Items: 2")),
+            (60, format!("{total}  Items: 2")),
+            (50, total.clone()),
+        ];
+        for (width, left) in cases {
+            assert_eq!(footer_at(&mut b, width), aligned(&left, free, width));
+        }
+        let footer = footer_at(&mut b, 40);
+        assert!(!footer.contains("free"), "{footer}");
+    }
+
+    #[test]
+    fn a_failed_read_shows_no_free_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, _, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        b.message = None;
+        b.free = FreeSpace::new(Box::new(|_| None));
+        b.refresh_free();
+        let footer = footer_at(&mut b, 100);
+        assert!(
+            !footer.contains("free") && footer.ends_with("1/2 "),
+            "{footer}"
+        );
+    }
+
+    /// A browser that deletes `name` for good, half done, with a message.
+    fn deleting(root: &Path, files: &[&str], name: &str) -> (Browser, mpsc::Sender<()>) {
+        let (mut b, gate, _) = gated_browser(root, files, remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        point_at(&mut b, name);
+        press(&mut b, "Dy");
+        b.pending[0].progress.removed.store(1, Ordering::Relaxed);
+        set_time(3000);
+        b.tick();
+        b.message = Some("Deleted 1 item.".into());
+        fake_free(&mut b);
+        (b, gate)
+    }
+
+    #[test]
+    fn the_free_space_stays_with_a_message_and_the_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate) = deleting(tmp.path(), &["A/a1", "z"], "A");
+        let free = "182.3 GiB free ";
+        let cases = [
+            (
+                100,
+                " Deleted 1 item.  |  Deleting A: 50% done, less than 5 s left (1 of 2 items)",
+            ),
+            (
+                80,
+                " Deleted 1 item.  |  Deleting A: 50% done, less than 5 s left",
+            ),
+        ];
+        for (width, left) in cases {
+            assert_eq!(footer_at(&mut b, width), aligned(left, free, width));
+        }
+        let footer = footer_at(&mut b, 60);
+        assert!(!footer.contains("free"), "{footer}");
+        assert!(footer.contains("50% done, less than 5 s left"), "{footer}");
+        assert!(footer.contains("Deleted 1 ite"), "{footer}");
+        b.message = None;
+        let footer = footer_at(&mut b, 80);
+        assert!(footer.ends_with("182.3 GiB free "), "{footer}");
+        assert!(footer.contains("less than 5 s left"), "{footer}");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn a_long_folder_name_keeps_percent_and_time_left_and_drops_the_free_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "a-long-folder-name-that-needs-room-in-the-footer";
+        let (mut b, gate) = deleting(tmp.path(), &[&format!("{long}/f1"), "z"], long);
+        for width in [100, 80] {
+            let footer = footer_at(&mut b, width);
+            assert_eq!(footer.chars().count(), usize::from(width));
+            assert!(footer.contains("50% done, less than 5 s left"), "{footer}");
+            assert!(footer.contains("Deleted 1 i"), "{footer}");
+            assert!(!footer.contains("free"), "{footer}");
+        }
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn the_free_space_is_read_again_after_a_delete_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        let bytes = fake_free(&mut b);
+        point_at(&mut b, "a");
+        press(&mut b, "Dy");
+        bytes.store(FREE + (10 << 30), Ordering::Relaxed);
+        assert_eq!(b.free.text().as_deref(), Some("182.3 GiB free"));
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(b.free.text().as_deref(), Some("192.3 GiB free"));
+    }
+
+    #[test]
+    fn the_free_space_is_read_again_every_two_seconds_while_a_delete_waits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        let set_time = with_clock(&mut b);
+        set_time(0);
+        let bytes = fake_free(&mut b);
+        point_at(&mut b, "a");
+        press(&mut b, "Dy");
+        bytes.store(FREE + (10 << 30), Ordering::Relaxed);
+        set_time(1900);
+        b.poll_jobs();
+        assert_eq!(b.free.text().as_deref(), Some("182.3 GiB free"));
+        set_time(2000);
+        b.poll_jobs();
+        assert_eq!(b.free.text().as_deref(), Some("192.3 GiB free"));
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+    }
+
+    #[test]
+    fn the_free_space_is_read_again_when_the_open_folder_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, _, _) = gated_browser(tmp.path(), &["A/a1", "b"], remove);
+        let bytes = fake_free(&mut b);
+        bytes.store(FREE + (10 << 30), Ordering::Relaxed);
+        b.poll_jobs();
+        assert_eq!(
+            b.free.text().as_deref(),
+            Some("182.3 GiB free"),
+            "same folder"
+        );
+        go_to(&mut b, "A");
+        b.poll_jobs();
+        assert_eq!(b.free.text().as_deref(), Some("192.3 GiB free"));
+    }
+
+    fn freed(bytes: u64) -> String {
+        format!("Freed {}.", format_size(bytes).trim_start())
+    }
+
+    /// The disk usage of the named rows.
+    fn disk_of(b: &Browser, names: &[&str]) -> u64 {
+        names
+            .iter()
+            .map(|n| b.dir().entries[b.dir().find(n.as_bytes()).unwrap()].counted_disk())
+            .sum()
+    }
+
+    #[test]
+    fn a_permanent_delete_says_how_much_it_freed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        let size = disk_of(&b, &["a"]);
+        assert!(size > 0);
+        point_at(&mut b, "a");
+        press(&mut b, "Dy");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(
+            b.message.as_deref(),
+            Some(format!("Deleted 1 item. {}", freed(size)).as_str())
+        );
+    }
+
+    #[test]
+    fn a_permanent_delete_of_several_rows_adds_up_the_sizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b", "c"], remove);
+        let size = disk_of(&b, &["a", "b"]);
+        point_at(&mut b, "a");
+        press(&mut b, "  Dy");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(
+            b.message.as_deref(),
+            Some(format!("Deleted 2 items. {}", freed(size)).as_str())
+        );
+    }
+
+    #[test]
+    fn a_partly_failed_permanent_delete_counts_only_the_rows_that_are_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let act = |p: &Path| {
+            if file_name(p) == "b" {
+                Err("busy".to_string())
+            } else {
+                remove(p)
+            }
+        };
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b"], act);
+        let gone = b.dir().entries[b.dir().find(b"a").unwrap()].counted_disk();
+        point_at(&mut b, "a");
+        press(&mut b, "  Dy");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        assert_eq!(
+            b.message.as_deref(),
+            Some(format!("Deleted 1 of 2 items. {} Error: busy", freed(gone)).as_str())
+        );
+    }
+
+    #[test]
+    fn a_move_to_the_trash_does_not_say_freed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut b, gate, _) = gated_browser(tmp.path(), &["a", "b"], remove);
+        point_at(&mut b, "a");
+        press(&mut b, "dy");
+        gate.send(()).unwrap();
+        wait(&mut b, |b| b.pending.is_empty());
+        let message = b.message.as_deref().unwrap();
+        assert!(
+            message.starts_with("Moved to the Trash: 1 item."),
+            "{message}"
+        );
+        assert!(!message.contains("Freed"), "{message}");
     }
 }
