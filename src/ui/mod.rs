@@ -1,4 +1,5 @@
 mod browser;
+mod free_space;
 mod job_progress;
 mod progress;
 mod prompt;

@@ -212,51 +212,108 @@ fn message_and_status(message: &str, status: &str, width: usize) -> String {
     format!("{cut}…{SEP}{status}")
 }
 
-fn footer_line(b: &Browser, width: usize) -> Line<'static> {
+/// Between the free space and the row position.
+const FREE_SEP: &str = "  ";
+/// The columns between the left text and the right part, at least. It keeps
+/// `right_align` from falling back to a separator.
+const MIN_GAP: usize = 3;
+
+/// The message and the queue state, when there is one.
+fn notice(b: &Browser, width: usize) -> Option<String> {
     let status = b.status(width);
     let message = if b.quitting() {
         None
     } else {
         b.message.as_deref()
     };
-    let text = match (message, status.as_deref()) {
+    match (message, status.as_deref()) {
         (Some(m), Some(s)) => Some(message_and_status(m, s, width)),
         (Some(t), None) | (None, Some(t)) => Some(t.to_string()),
         (None, None) => None,
-    };
-    if let Some(text) = text {
+    }
+}
+
+fn footer_line(b: &Browser, width: usize) -> Line<'static> {
+    let free = b.free.text();
+    if let Some(free) = &free {
+        // The free space takes columns from the status, which shrinks but
+        // keeps percent and time left. It never cuts the message. When the
+        // line cannot hold all of them, the free space drops first.
+        let right = format!("{free} ");
+        let room = width.saturating_sub(right.chars().count() + MIN_GAP);
+        let whole = |t: &String| match b.message.as_deref().filter(|_| !b.quitting()) {
+            Some(m) => t.starts_with(m),
+            None => true,
+        };
+        if let Some(text) = notice(b, room).filter(|t| t.chars().count() < room && whole(t)) {
+            return bar(&right_align(format!(" {text}"), &right, width));
+        }
+    }
+    if let Some(text) = notice(b, width) {
         return bar(&format!(" {text}"));
     }
     let t = b.dir().totals();
-    let mut text = format!(
-        " Total disk usage: {}  Apparent size: {}  Items: {}",
-        format_size(t.disk).trim_start(),
-        format_size(t.apparent).trim_start(),
-        t.items
-    );
     let (count, size) = b.selected().fold((0, 0), |(n, s), i| {
         (n + 1, s + b.dir().entries[i].size(b.sort.apparent))
     });
-    if count > 0 {
-        let _ = write!(
-            text,
-            "   |  {count} selected: {}",
-            format_size(size).trim_start()
-        );
-    }
     let sort = match (b.sort.key, b.sort.apparent) {
         (SortKey::Size, false) => "disk usage",
         (SortKey::Size, true) => "apparent size",
         (SortKey::Name, _) => "name",
         (SortKey::Items, _) => "items",
     };
-    let _ = write!(text, "   |  Sorted by {sort}");
+    let line = |apparent: bool, items: bool, sorted: bool| {
+        let mut text = format!(" Total disk usage: {}", format_size(t.disk).trim_start());
+        if apparent {
+            let _ = write!(
+                text,
+                "  Apparent size: {}",
+                format_size(t.apparent).trim_start()
+            );
+        }
+        if items {
+            let _ = write!(text, "  Items: {}", t.items);
+        }
+        if count > 0 {
+            let _ = write!(
+                text,
+                "   |  {count} selected: {}",
+                format_size(size).trim_start()
+            );
+        }
+        if sorted {
+            let _ = write!(text, "   |  Sorted by {sort}");
+        }
+        text
+    };
     let len = b.dir().entries.len();
-    if len > 0 {
-        let position = format!("{}/{len} ", b.cursor + 1);
-        text = right_align(text, &position, width);
+    let position = (len > 0).then(|| format!("{}/{len}", b.cursor + 1));
+    let full = line(true, true, true);
+    // The free space comes before the position. When the line cannot hold
+    // it, the sort, the apparent size and the item count drop in this order.
+    let with_free = free.as_ref().and_then(|free| {
+        let right = match &position {
+            Some(position) => format!("{free}{FREE_SEP}{position} "),
+            None => format!("{free} "),
+        };
+        [
+            (true, true, true),
+            (true, true, false),
+            (false, true, false),
+            (false, false, false),
+        ]
+        .into_iter()
+        .map(|(apparent, items, sorted)| line(apparent, items, sorted))
+        .find(|text| text.chars().count() + right.chars().count() + MIN_GAP <= width)
+        .map(|text| right_align(text, &right, width))
+    });
+    if let Some(text) = with_free {
+        return bar(&text);
     }
-    bar(&text)
+    match position {
+        Some(position) => bar(&right_align(full, &format!("{position} "), width)),
+        None => bar(&full),
+    }
 }
 
 /// Puts `right` at the right edge of a line of `width` columns, after `text`.
