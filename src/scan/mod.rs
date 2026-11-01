@@ -968,7 +968,7 @@ mod tests {
         let dir = scan(tmp.path(), &opts(), &Progress::default()).unwrap();
         let mut tree = crate::tree::Tree {
             path: tmp.path().to_path_buf(),
-            dir: Box::new(dir),
+            dir: std::sync::Arc::new(dir),
         };
         let before = tree.dir.totals();
 

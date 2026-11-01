@@ -130,6 +130,7 @@ impl JobProgress {
         }
     }
 
+    #[cfg(test)]
     pub fn left(&self, now: Instant) -> Left {
         if self.stalled {
             Left::Waiting
@@ -139,22 +140,38 @@ impl JobProgress {
     }
 
     /// The time left, or None while the guess would be poor.
+    #[cfg(test)]
     pub fn time_left(&self, now: Instant) -> Option<Duration> {
+        self.time_left_of(now, self.removed(), self.total?)
+    }
+
+    /// The same for a group of jobs, where `removed` and `total` count all
+    /// jobs of the group. The rate is the one of this job.
+    pub fn time_left_of(&self, now: Instant, removed: u64, total: u64) -> Option<Duration> {
         let elapsed = self.elapsed(now)?;
-        let total = self.total?;
-        let removed = self.removed().min(total);
+        let removed = removed.min(total);
         if elapsed < ETA_AFTER || removed * 100 < total * ETA_MIN_PERCENT {
             return None;
         }
-        let rate = self
-            .shown_rate
-            .unwrap_or_else(|| removed as f64 / elapsed.as_secs_f64());
+        let rate = self.shown_rate.unwrap_or_else(|| {
+            self.removed().min(self.total.unwrap_or(u64::MAX)) as f64 / elapsed.as_secs_f64()
+        });
         if rate <= 0.0 {
             return None;
         }
         Duration::try_from_secs_f64((total - removed) as f64 / rate)
             .ok()
             .filter(|left| *left <= MAX_LEFT)
+    }
+
+    /// What the footer says about the time for a group of jobs.
+    pub fn left_of(&self, now: Instant, removed: u64, total: u64) -> Left {
+        if self.stalled {
+            Left::Waiting
+        } else {
+            self.time_left_of(now, removed, total)
+                .map_or(Left::Unknown, Left::In)
+        }
     }
 }
 

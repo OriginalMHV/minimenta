@@ -14,6 +14,7 @@ mod delete;
 #[cfg(target_os = "macos")]
 mod fsevents;
 mod scan;
+mod search;
 mod tree;
 mod ui;
 

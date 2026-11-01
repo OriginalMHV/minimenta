@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::browser::{Browser, Mode};
 use super::display_path;
+use super::search_view;
 use crate::tree::{Dir, Entry, Kind, SortKey, flag, format_size};
 
 const BAR_WIDTH: usize = 10;
@@ -41,6 +42,27 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
     .areas(frame.area());
 
     frame.render_widget(header_bar(), header);
+    if b.search.is_some() {
+        search_view::draw(frame, b, path, list, footer);
+    } else {
+        draw_browse(frame, b, path, list, footer);
+    }
+
+    match &b.mode {
+        Mode::Browse => {}
+        Mode::Help if b.search.is_some() => search_view::draw_help(frame, b),
+        Mode::Help => draw_help(frame, b),
+        Mode::Confirm { permanent, targets } => {
+            let (size, names) = match &b.search {
+                Some(s) => search_view::confirm_rows(s, targets),
+                None => browse_confirm_rows(b, targets),
+            };
+            draw_confirm(frame, *permanent, size, &names);
+        }
+    }
+}
+
+fn draw_browse(frame: &mut Frame, b: &mut Browser, path: Rect, list: Rect, footer: Rect) {
     let title = format!(
         "--- {} ",
         tail(
@@ -55,12 +77,6 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
     b.offset = scroll(b.offset, b.cursor, b.list_height, b.dir().entries.len());
     draw_list(frame, b, list);
     frame.render_widget(footer_line(b, footer.width as usize), footer);
-
-    match &b.mode {
-        Mode::Browse => {}
-        Mode::Help => draw_help(frame, b),
-        Mode::Confirm { permanent, targets } => draw_confirm(frame, b, *permanent, targets),
-    }
 }
 
 /// The first visible row for `cursor` on a screen of `height` rows, starting
@@ -68,7 +84,7 @@ pub fn draw(frame: &mut Frame, b: &mut Browser) {
 /// within `SCROLL_MARGIN` rows of an edge, and the margin is at most a third
 /// of the screen. At the start and the end of the list the margin shrinks, so
 /// the first and the last row stay reachable.
-fn scroll(offset: usize, cursor: usize, height: usize, len: usize) -> usize {
+pub(super) fn scroll(offset: usize, cursor: usize, height: usize, len: usize) -> usize {
     let margin = SCROLL_MARGIN.min(height.saturating_sub(1) / 3);
     let offset = if cursor < offset + margin {
         cursor.saturating_sub(margin)
@@ -183,7 +199,7 @@ fn flag_char(e: &Entry) -> char {
 }
 
 /// Keeps the end of `text`, which holds the current folder name, within `max` characters.
-fn tail(text: &str, max: usize) -> String {
+pub(super) fn tail(text: &str, max: usize) -> String {
     let len = text.chars().count();
     if len <= max {
         return text.to_string();
@@ -213,13 +229,13 @@ fn message_and_status(message: &str, status: &str, width: usize) -> String {
 }
 
 /// Between the free space and the row position.
-const FREE_SEP: &str = "  ";
+pub(super) const FREE_SEP: &str = "  ";
 /// The columns between the left text and the right part, at least. It keeps
 /// `right_align` from falling back to a separator.
-const MIN_GAP: usize = 3;
+pub(super) const MIN_GAP: usize = 3;
 
 /// The message and the queue state, when there is one.
-fn notice(b: &Browser, width: usize) -> Option<String> {
+pub(super) fn notice(b: &Browser, width: usize) -> Option<String> {
     let status = b.status(width);
     let message = if b.quitting() {
         None
@@ -233,9 +249,10 @@ fn notice(b: &Browser, width: usize) -> Option<String> {
     }
 }
 
-fn footer_line(b: &Browser, width: usize) -> Line<'static> {
-    let free = b.free.text();
-    if let Some(free) = &free {
+/// The footer when there is a message or a queue state, with the free
+/// space on the right when it fits. `None` when there is nothing to say.
+pub(super) fn notice_line(b: &Browser, width: usize) -> Option<Line<'static>> {
+    if let Some(free) = b.free.text() {
         // The free space takes columns from the status, which shrinks but
         // keeps percent and time left. It never cuts the message. When the
         // line cannot hold all of them, the free space drops first.
@@ -246,11 +263,26 @@ fn footer_line(b: &Browser, width: usize) -> Line<'static> {
             None => true,
         };
         if let Some(text) = notice(b, room).filter(|t| t.chars().count() < room && whole(t)) {
-            return bar(&right_align(format!(" {text}"), &right, width));
+            return Some(bar(&right_align(format!(" {text}"), &right, width)));
         }
     }
-    if let Some(text) = notice(b, width) {
-        return bar(&format!(" {text}"));
+    notice(b, width).map(|text| bar(&format!(" {text}")))
+}
+
+/// The right part of the footer: the free space, then the row position.
+pub(super) fn footer_right(free: Option<&str>, position: Option<&str>) -> Option<String> {
+    match (free, position) {
+        (Some(free), Some(position)) => Some(format!("{free}{FREE_SEP}{position} ")),
+        (Some(free), None) => Some(format!("{free} ")),
+        (None, Some(position)) => Some(format!("{position} ")),
+        (None, None) => None,
+    }
+}
+
+fn footer_line(b: &Browser, width: usize) -> Line<'static> {
+    let free = b.free.text();
+    if let Some(line) = notice_line(b, width) {
+        return line;
     }
     let t = b.dir().totals();
     let (count, size) = b.selected().fold((0, 0), |(n, s), i| {
@@ -292,10 +324,7 @@ fn footer_line(b: &Browser, width: usize) -> Line<'static> {
     // The free space comes before the position. When the line cannot hold
     // it, the sort, the apparent size and the item count drop in this order.
     let with_free = free.as_ref().and_then(|free| {
-        let right = match &position {
-            Some(position) => format!("{free}{FREE_SEP}{position} "),
-            None => format!("{free} "),
-        };
+        let right = footer_right(Some(free), position.as_deref())?;
         [
             (true, true, true),
             (true, true, false),
@@ -318,7 +347,7 @@ fn footer_line(b: &Browser, width: usize) -> Line<'static> {
 
 /// Puts `right` at the right edge of a line of `width` columns, after `text`.
 /// When both do not fit, `right` follows `text` after a separator.
-fn right_align(mut text: String, right: &str, width: usize) -> String {
+pub(super) fn right_align(mut text: String, right: &str, width: usize) -> String {
     let used = text.chars().count() + right.chars().count();
     if used + 3 <= width {
         text.push_str(&" ".repeat(width - used));
@@ -329,7 +358,13 @@ fn right_align(mut text: String, right: &str, width: usize) -> String {
     text
 }
 
-fn popup(frame: &mut Frame, width: u16, height: u16, title: &str, border: Color) -> Rect {
+pub(super) fn popup(
+    frame: &mut Frame,
+    width: u16,
+    height: u16,
+    title: &str,
+    border: Color,
+) -> Rect {
     let area = frame.area();
     let w = width.min(area.width.saturating_sub(2));
     let h = height.min(area.height.saturating_sub(2));
@@ -353,6 +388,7 @@ const HELP: &[(&str, &str)] = &[
     ("Shift+Up/Down, K/J", "Extend the selection"),
     ("Space", "Select or deselect, then move down"),
     ("Ctrl+A / Esc", "Select all / clear the selection"),
+    ("/", "Search this folder (? in the search lists the words)"),
     ("Enter, Right, l", "Open the directory"),
     ("Left, h, Backspace", "Go to the parent directory"),
     ("d", "Move to the Trash (selection or cursor)"),
@@ -391,7 +427,6 @@ fn draw_help(frame: &mut Frame, b: &Browser) {
     lines.push(Line::from(""));
     lines.push(Line::from(" Flags: ! read error  . error below  > other file system").dark_gray());
     lines.push(Line::from("        H hard link  @ symlink or special  e empty").dark_gray());
-    lines.push(Line::from(""));
     // t and p keep the help open while their question is off.
     let close = if b.ask_trash && b.ask_delete {
         " Press any key to close"
@@ -403,16 +438,29 @@ fn draw_help(frame: &mut Frame, b: &Browser) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usize]) {
+/// The total size and the lines of the question for the rows at `targets`.
+fn browse_confirm_rows(b: &Browser, targets: &[usize]) -> (u64, Vec<String>) {
     let dir = b.dir();
-    let size: u64 = targets
+    let size = targets
         .iter()
         .map(|&i| dir.entries[i].size(b.sort.apparent))
         .sum();
-    let what = if targets.len() == 1 {
+    let names = targets
+        .iter()
+        .map(|&i| {
+            let e = &dir.entries[i];
+            let slash = if e.kind == Kind::Dir { "/" } else { "" };
+            format!("{slash}{}", String::from_utf8_lossy(dir.name(e)))
+        })
+        .collect();
+    (size, names)
+}
+
+fn draw_confirm(frame: &mut Frame, permanent: bool, size: u64, names: &[String]) {
+    let what = if names.len() == 1 {
         "1 item".to_string()
     } else {
-        format!("{} items", targets.len())
+        format!("{} items", names.len())
     };
     let (title, question, border) = if permanent {
         (
@@ -427,7 +475,7 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
             ACCENT,
         )
     };
-    let shown = targets.len().min(6);
+    let shown = names.len().min(6);
     let plain = Style::new();
     let mut text = vec![
         (
@@ -440,14 +488,11 @@ fn draw_confirm(frame: &mut Frame, b: &Browser, permanent: bool, targets: &[usiz
         ),
         (String::new(), plain),
     ];
-    for &i in &targets[..shown] {
-        let e = &dir.entries[i];
-        let slash = if e.kind == Kind::Dir { "/" } else { "" };
-        let name = String::from_utf8_lossy(dir.name(e));
-        text.push((format!("   {slash}{name}"), plain));
+    for name in &names[..shown] {
+        text.push((format!("   {name}"), plain));
     }
-    if targets.len() > shown {
-        let more = format!("   … and {} more", targets.len() - shown);
+    if names.len() > shown {
+        let more = format!("   … and {} more", names.len() - shown);
         text.push((more, Style::new().fg(Color::DarkGray)));
     }
     text.push((String::new(), plain));
