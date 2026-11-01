@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A stored name as an `OsStr`. Names are stored as the platform's encoded
 /// bytes (`OsStr::as_encoded_bytes`), so they turn back into paths unchanged.
@@ -38,6 +39,7 @@ pub mod flag {
 
 /// Names live in the parent's `Dir::names` buffer, so a scan allocates once
 /// per directory instead of once per file.
+#[derive(Clone)]
 pub struct Entry {
     pub(crate) name_start: u32,
     pub(crate) name_len: u32,
@@ -95,7 +97,7 @@ pub struct Sort {
     pub apparent: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Dir {
     pub names: Vec<u8>,
     pub entries: Vec<Entry>,
@@ -214,23 +216,43 @@ impl Dir {
     }
 }
 
+/// The root is shared with a search thread, which reads it while the user
+/// types. Every change goes through `root_mut`, and the browser stops the
+/// search first, so the root is never copied.
 pub struct Tree {
     pub path: PathBuf,
-    pub dir: Box<Dir>,
+    pub dir: Arc<Dir>,
+}
+
+/// The folder at `stack` below `root`.
+pub fn dir_in<'a>(root: &'a Dir, stack: &[usize]) -> &'a Dir {
+    stack.iter().fold(root, |d, &i| {
+        d.entries[i]
+            .dir
+            .as_ref()
+            .expect("stack points to a directory")
+    })
 }
 
 impl Tree {
     pub fn dir_at(&self, stack: &[usize]) -> &Dir {
-        stack.iter().fold(&self.dir, |d, &i| {
-            d.entries[i]
-                .dir
-                .as_ref()
-                .expect("stack points to a directory")
-        })
+        dir_in(&self.dir, stack)
+    }
+
+    /// The root for a change. `Arc::make_mut` would copy the whole tree if a
+    /// search thread still held it, so a shared root is a bug: the browser
+    /// must stop the search before it changes the tree.
+    fn root_mut(&mut self) -> &mut Dir {
+        debug_assert_eq!(
+            Arc::strong_count(&self.dir),
+            1,
+            "the tree is shared with a search thread"
+        );
+        Arc::make_mut(&mut self.dir)
     }
 
     pub fn dir_at_mut(&mut self, stack: &[usize]) -> &mut Dir {
-        let mut d = &mut self.dir;
+        let mut d = self.root_mut();
         for &i in stack {
             d = d.entries[i]
                 .dir
@@ -260,7 +282,7 @@ impl Tree {
                 e.flags |= flag::SUB_ERROR;
             }
         }
-        refresh(&mut self.dir, stack);
+        refresh(self.root_mut(), stack);
     }
 }
 
@@ -328,7 +350,7 @@ mod tests {
         root.attach(0, mid, 0);
         let mut tree = Tree {
             path: PathBuf::from("/"),
-            dir: Box::new(root),
+            dir: Arc::new(root),
         };
         let before = tree.dir.totals();
 
@@ -349,7 +371,7 @@ mod tests {
         root.sort(Sort::default());
         let mut tree = Tree {
             path: PathBuf::from("/"),
-            dir: Box::new(root),
+            dir: Arc::new(root),
         };
 
         tree.dir_at_mut(&[0]).entries.clear();

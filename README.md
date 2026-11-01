@@ -63,6 +63,50 @@ mm --summary ~/code          # print the totals without the interface
 
 Press Esc during a scan to cancel it, or `q` to quit.
 
+## Search
+
+Press `/` to search the open folder and everything below it. The search reads the scan in memory, so it is fast and never touches the disk. It runs while you type. The results replace the list. Each row shows the size and the path below the open folder, so you see where the item is.
+
+```text
+/@dev          # every node_modules, Rust target, Gradle build ... folder
+Ctrl+A, D      # select all results, then delete them (after the question)
+/@rust size>1G # Rust build folders over 1 GiB
+```
+
+Words are separated by spaces. Every word must match.
+
+| Word | Matches |
+| --- | --- |
+| `text` | A name with the text in it, in any case |
+| `*.log`, `a?c` | A name that fits the pattern (`*` is any text, `?` is one character) |
+| `cache/` | A path below the open folder with the text in it. A pattern works too. |
+| `size>1G`, `size<=500M` | A size above or below the limit. The units are K, M, G and T (base 1024). The size is the one in the list (`a` switches it). |
+| `type:dir`, `type:file` | Folders, or everything else (links count as files) |
+| `-word`, `-*.git` | Leaves out the paths with the word. A pattern is tested against each name in the path. |
+| `@name` | A ready-made search |
+
+The ready-made searches look at names only. Type `@` to list them. Tab completes a name.
+
+| Search | Finds |
+| --- | --- |
+| `@node` | `node_modules` folders with a `package.json` next to them |
+| `@rust` | `target` folders next to a `Cargo.toml`, or with a `CACHEDIR.TAG` |
+| `@gradle` | `build` folders next to a `build.gradle` or `build.gradle.kts`, and `.gradle` folders next to one of those or a `settings.gradle` or `settings.gradle.kts` |
+| `@python` | `__pycache__` folders, and `.venv` or `venv` folders with a `pyvenv.cfg` |
+| `@xcode` | `DerivedData` and `* DeviceSupport` folders directly in a `Developer/Xcode` folder |
+| `@cache` | Folders with a `CACHEDIR.TAG`, and a `Caches` folder directly in a `Library` folder |
+| `@dev` | All of the above |
+
+The ready-made searches leave some places out on purpose:
+
+- A `node_modules` folder without a `package.json` next to it is a global install, for example in `/opt/homebrew/lib` or `~/.nvm`. Other tools use it.
+- The `.gradle` folder in your home folder has no project file next to it. It holds credentials (`gradle.properties`) and the Gradle downloads.
+- Nothing inside an app bundle (a folder name that ends in `.app`) and nothing inside the extensions of an editor (`.vscode/extensions`, `.vscode-insiders/extensions` and `.cursor/extensions`) is listed. A delete there breaks the app or the editor.
+
+A folder that matches hides what is inside it. A `node_modules` folder in another `node_modules` folder is not listed, so the sizes add up and you never delete a child after its parent. The list shows the largest 10,000 matches.
+
+Keys: Enter or Down moves from the query to the results, and `/` goes back to the query. Space selects, Ctrl+A selects all results, and `d` or `D` delete as in the browser. Enter on a result leaves the search and shows the folder of the item. Esc clears the selection first and then leaves the search. `r` and `u` do not work in a search. Press `?` in the results for the list of keys and words.
+
 ## Keys
 
 | Keys | Action |
@@ -71,6 +115,7 @@ Press Esc during a scan to cancel it, or `q` to quit.
 | Shift+Up/Down, `K` / `J` | Extend the selection |
 | Space | Select or deselect, then move down |
 | Ctrl+A / Esc | Select all / clear the selection |
+| `/` | [Search](#search) the open folder |
 | Enter, Right, `l` | Open the folder |
 | Left, `h`, Backspace | Go to the parent folder |
 | `d` | Move the selection (or the item under the cursor) to the Trash |

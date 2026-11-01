@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Search with `/`. It reads the scan in memory and runs while you type. Words can be a name, a pattern like `*.log`, a path like `cache/`, `size>1G`, `type:dir` and `-word`. Ready-made searches find build folders that grow large: `@node`, `@rust`, `@gradle`, `@python`, `@xcode`, `@cache` and `@dev`. Each result shows its path below the open folder. You can select results and delete them with `d` or `D`.
 - macOS: when minimenta cannot use the cache, the progress screen gives the reason on a second line under the message. Examples are a last full scan older than 7 days, a replay that did not finish in its time limit, and more than 20,000 changes. For too many changes, the line shows the number of changes, the number of different folders among them, and the limit.
 - The footer shows the free space of the disk that holds the open folder, for example `182.3 GiB free  1/2`. It stays while a message or the delete progress shows. On a narrow line it drops first, so the percent and the time left stay. minimenta reads it at start, after a delete or a rescan, when the open folder changes, and every 2 s while deletes run. After `D`, the message adds the space it freed, for example `Deleted 1 item. Freed 12.4 GiB.` After `d` it does not, because the Trash keeps the files until you empty it.
 

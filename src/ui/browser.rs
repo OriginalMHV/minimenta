@@ -18,6 +18,12 @@ use crate::cache::{self, Header, Source};
 use crate::scan::{self, Options, Progress};
 use crate::tree::{Dir, Entry, Sort, SortKey, Tree, flag, format_size, os_name};
 
+mod search;
+#[cfg(test)]
+mod search_tests;
+
+pub use search::{Focus, HELP_PAGES, Search};
+
 pub enum Mode {
     Browse,
     Help,
@@ -50,6 +56,8 @@ pub struct Browser {
     /// The free space of the volume under the open folder. It changes on
     /// events, not on every redraw.
     pub free: FreeSpace,
+    /// The search screen, when it is open. It replaces the list.
+    pub search: Option<Search>,
     range: Option<Range>,
     opts: Options,
     /// Set when a rescan or delete corrected the tree, so it is saved on quit.
@@ -66,6 +74,8 @@ pub struct Browser {
     /// The deletes that the worker has not finished or that wait for `done`
     /// to be applied, the oldest first.
     pending: VecDeque<Pending>,
+    next_group: u64,
+    group_acc: Option<GroupAcc>,
     /// Results of the oldest pending jobs. A result that changes the tree
     /// waits here until the screen can take it.
     done: VecDeque<JobResult>,
@@ -160,6 +170,22 @@ struct Pending {
     permanent: bool,
     offset: usize,
     progress: JobProgress,
+    /// The jobs of one delete from a search share this id. The footer sums
+    /// them and one message ends them.
+    group: Option<u64>,
+}
+
+/// What the finished jobs of a group have done so far.
+struct GroupAcc {
+    id: u64,
+    rows: usize,
+    gone: usize,
+    items_total: u64,
+    items_removed: u64,
+    /// Bytes that the finished jobs freed (permanent deletes only).
+    freed: u64,
+    undoable: bool,
+    error: Option<String>,
 }
 
 /// One thread runs the jobs in order, so deletes keep their order and
@@ -251,6 +277,7 @@ pub fn run(
     {
         cache::save_in_background(&session, &browser.tree.dir);
     }
+    browser.freeze_search();
     // Freeing millions of nodes takes time and the process ends right after.
     std::mem::forget(browser);
     result.map(|_| ())
@@ -278,6 +305,7 @@ impl Browser {
             message: describe(source),
             list_height: 1,
             free: FreeSpace::real(),
+            search: None,
             range: None,
             opts,
             session,
@@ -287,6 +315,8 @@ impl Browser {
             ask_delete: true,
             worker: Worker::spawn(opts, deleter),
             pending: VecDeque::new(),
+            next_group: 0,
+            group_acc: None,
             done: VecDeque::new(),
             quitting: false,
             message_is_error: false,
@@ -330,32 +360,54 @@ impl Browser {
             return Some("Waiting to update the list …".into());
         }
         let now = (self.clock)();
-        let queue = (self.pending.len() > 1).then(|| self.queue());
+        // The jobs of one search delete show as one.
+        let jobs: Vec<&Pending> = match first.group {
+            Some(_) => self
+                .pending
+                .iter()
+                .take_while(|p| p.group == first.group)
+                .collect(),
+            None => vec![first],
+        };
+        let acc = self
+            .group_acc
+            .as_ref()
+            .filter(|a| Some(a.id) == first.group);
+        let rows = acc.map_or(0, |a| a.rows) + jobs.iter().map(|p| p.paths.len()).sum::<usize>();
+        let queue = (self.pending.len() > jobs.len()).then(|| self.queue(jobs.len()));
         let progress = &first.progress;
-        let Some(total) = progress.total().filter(|_| first.permanent) else {
+        let total = jobs
+            .iter()
+            .map(|p| p.progress.total())
+            .sum::<Option<u64>>()
+            .filter(|_| first.permanent)
+            .map(|t| t + acc.map_or(0, |a| a.items_total));
+        let Some(total) = total else {
             let elapsed = progress.elapsed(now);
             return Some(job_progress::trashing_text(
-                &count(first.paths.len()),
+                &count(rows),
                 elapsed,
                 queue.as_ref(),
             ));
         };
+        let removed = acc.map_or(0, |a| a.items_removed)
+            + jobs.iter().map(|p| p.progress.removed()).sum::<u64>();
         let mut budget = width.saturating_sub(1);
         if self.message.is_some() {
             // Must match the room rule in `view::message_and_status`.
             budget = budget.saturating_sub(view::STATUS_SEP.len() + view::MIN_MESSAGE);
         }
         let label = match first.paths.as_slice() {
-            [one] => one
+            [one] if rows == 1 => one
                 .file_name()
                 .map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into()),
-            many => count(many.len()),
+            _ => count(rows),
         };
         Some(job_progress::deleting_text(
             &label,
-            progress.removed(),
+            removed,
             total,
-            progress.left(now),
+            progress.left_of(now, removed, total),
             queue.as_ref(),
             budget,
         ))
@@ -363,8 +415,8 @@ impl Browser {
 
     /// The jobs behind the running one. The item count shows only when each
     /// of them is a permanent delete with a known total.
-    fn queue(&self) -> Queue {
-        let waiting = self.pending.iter().skip(1);
+    fn queue(&self, running: usize) -> Queue {
+        let waiting = self.pending.iter().skip(running);
         let items = waiting
             .clone()
             .map(|p| p.progress.total().filter(|_| p.permanent))
@@ -388,12 +440,16 @@ impl Browser {
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
         loop {
             self.poll_jobs();
+            self.poll_search();
             if self.quitting && self.pending.is_empty() {
                 return Ok(Exit::Normal);
             }
             terminal.draw(|frame| view::draw(frame, self))?;
-            // Nothing changes by itself without a job, so wait for a key.
-            if !self.pending.is_empty() && !event::poll(Duration::from_millis(100))? {
+            // Nothing changes by itself without a job or a search, so wait
+            // for a key.
+            let busy =
+                !self.pending.is_empty() || self.search.as_ref().is_some_and(Search::searching);
+            if busy && !event::poll(Duration::from_millis(50))? {
                 continue;
             }
             let Event::Key(key) = event::read()? else {
@@ -413,6 +469,18 @@ impl Browser {
     /// Handles one key press. Everything but a rescan, which needs the
     /// terminal, happens here so tests can drive it.
     fn step(&mut self, key: KeyEvent) -> Step {
+        // The search thread reads the tree, so only a plain move leaves it running.
+        let shown_new_list = !self.keeps_search_running(key) && self.freeze_search();
+        if shown_new_list && self.acts_on_list(key) {
+            self.message = Some("The list changed. Check it, then press the key again.".into());
+            return Step::Continue;
+        }
+        let step = self.step_key(key);
+        self.poll_search();
+        step
+    }
+
+    fn step_key(&mut self, key: KeyEvent) -> Step {
         if self.quitting {
             if quits(key) {
                 return Step::Exit(Exit::Forced);
@@ -426,6 +494,9 @@ impl Browser {
             Action::None => {}
             Action::Quit if self.pending.is_empty() => return Step::Exit(Exit::Normal),
             Action::Quit => self.quitting = true,
+            Action::Delete { permanent, targets } if self.search.is_some() => {
+                self.enqueue_results(permanent, &targets);
+            }
             Action::Delete { permanent, targets } => self.enqueue(permanent, &targets),
             Action::Rescan => return Step::Rescan,
             Action::Undo => self.undo(),
@@ -455,6 +526,9 @@ impl Browser {
             }
             let result = self.done.pop_front().expect("front exists");
             let job = self.pending.pop_front().expect("a result has a job");
+            if result.changes_tree() {
+                self.freeze_search();
+            }
             self.apply(job, result);
         }
         self.tick();
@@ -482,15 +556,32 @@ impl Browser {
     /// Takes the rows out of the tree at once and sends their paths to the
     /// worker. The entries stay in `pending` for the undo step or a put-back.
     fn enqueue(&mut self, permanent: bool, targets: &[usize]) {
-        let folder = self.current_path();
-        let mut targets = targets.to_vec();
-        targets.sort_unstable();
-        targets.dedup();
-        targets.retain(|&i| i < self.dir().entries.len());
-        if targets.is_empty() {
+        let (folder, stack) = (self.current_path(), self.stack.clone());
+        if !self.enqueue_at(folder, &stack, targets.to_vec(), permanent, None) {
             return;
         }
-        let dir = self.dir();
+        self.clear_selection();
+        self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
+        self.resort();
+    }
+
+    /// The same for rows of the folder at `stack`. Returns false when no row
+    /// is left to delete.
+    fn enqueue_at(
+        &mut self,
+        folder: PathBuf,
+        stack: &[usize],
+        mut targets: Vec<usize>,
+        permanent: bool,
+        group: Option<u64>,
+    ) -> bool {
+        targets.sort_unstable();
+        targets.dedup();
+        targets.retain(|&i| i < self.tree.dir_at(stack).entries.len());
+        if targets.is_empty() {
+            return false;
+        }
+        let dir = self.tree.dir_at(stack);
         let paths: Vec<PathBuf> = targets
             .iter()
             .map(|&i| folder.join(os_name(dir.name(&dir.entries[i]))))
@@ -500,14 +591,11 @@ impl Browser {
             .map(|&i| dir.entries[i].dir.is_some())
             .collect();
         let total = permanent.then(|| targets.iter().map(|&i| dir.entries[i].items).sum());
-        let dir = self.tree.dir_at_mut(&self.stack);
+        let dir = self.tree.dir_at_mut(stack);
         // From the end, so the indices that are left stay true.
         let mut taken: Vec<_> = targets.iter().rev().map(|&i| dir.take(i)).collect();
         taken.reverse();
-        self.tree.refresh_totals(&self.stack);
-        self.clear_selection();
-        self.cursor = self.cursor.min(self.dir().entries.len().saturating_sub(1));
-        self.resort();
+        self.tree.refresh_totals(stack);
         let progress = JobProgress::new(total, (self.clock)());
         let removed = Arc::clone(&progress.removed);
         self.pending.push_back(Pending {
@@ -517,6 +605,7 @@ impl Browser {
             permanent,
             offset: self.offset,
             progress,
+            group,
         });
         self.tick();
         // A failed send means the worker stopped. `poll_jobs` finds out.
@@ -526,6 +615,7 @@ impl Browser {
             permanent,
             removed,
         });
+        true
     }
 
     /// Settles one finished delete. The rows that are gone become the undo
@@ -541,15 +631,16 @@ impl Browser {
             }
         }
         let gone = removed.len();
-        let freed = job
+        let mut freed = job
             .permanent
             .then(|| removed.iter().map(|(_, e)| e.counted_disk()).sum::<u64>())
             .filter(|&bytes| bytes > 0);
         if !back.is_empty() {
             self.restore_rows(&job.folder, back);
+            self.rerun_search();
         }
         self.changed = true;
-        let undoable = !result.trashed.is_empty();
+        let mut undoable = !result.trashed.is_empty();
         if undoable {
             self.undo.push(UndoStep {
                 items: result.trashed,
@@ -559,16 +650,40 @@ impl Browser {
         } else {
             discard(removed);
         }
+        let (mut gone, mut total, mut error) = (gone, total, result.result);
+        if let Some(id) = job.group {
+            let acc = self.group_acc.get_or_insert(GroupAcc {
+                id,
+                rows: 0,
+                gone: 0,
+                items_total: 0,
+                items_removed: 0,
+                freed: 0,
+                undoable: false,
+                error: None,
+            });
+            acc.rows += total;
+            acc.gone += gone;
+            acc.items_total += job.progress.total().unwrap_or(0);
+            acc.items_removed += job.progress.removed();
+            acc.freed += freed.unwrap_or(0);
+            acc.undoable |= undoable;
+            if let Err(e) = error {
+                acc.error.get_or_insert(e);
+            }
+            // One message ends the group, when its last job ends.
+            if self.pending.iter().any(|p| p.group == Some(id)) {
+                return;
+            }
+            let acc = self.group_acc.take().expect("the group has a record");
+            (gone, total) = (acc.gone, acc.rows);
+            error = acc.error.map_or(Ok(()), Err);
+            undoable = acc.undoable;
+            freed = Some(acc.freed).filter(|&bytes| bytes > 0);
+        }
         let asks = *self.ask_mut(job.permanent);
-        let text = delete_message(
-            job.permanent,
-            (gone, total),
-            freed,
-            undoable,
-            asks,
-            &result.result,
-        );
-        self.show_delete_message(text, result.result.is_err());
+        let text = delete_message(job.permanent, (gone, total), freed, undoable, asks, &error);
+        self.show_delete_message(text, error.is_err());
         self.refresh_free();
     }
 
@@ -670,6 +785,16 @@ impl Browser {
             self.message_is_error = false;
         }
         match self.mode {
+            Mode::Help if self.search.is_some() => {
+                if let Some(s) = &mut self.search {
+                    s.help_page += 1;
+                    if s.help_page >= HELP_PAGES {
+                        s.help_page = 0;
+                        self.mode = Mode::Browse;
+                    }
+                }
+                return Action::None;
+            }
             Mode::Help => {
                 match key.code {
                     KeyCode::Char('t') if !self.ask_trash => self.ask_trash = true,
@@ -700,6 +825,9 @@ impl Browser {
             }
             Mode::Browse => {}
         }
+        if self.search.is_some() {
+            return self.handle_search(key);
+        }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -719,6 +847,7 @@ impl Browser {
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.open(),
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h' | '<') => self.up(),
             KeyCode::Char(' ') => self.toggle(),
+            KeyCode::Char('/') => self.open_search(),
             KeyCode::Esc => self.clear_selection(),
             KeyCode::Char('s') => self.set_sort(SortKey::Size),
             KeyCode::Char('n') => self.set_sort(SortKey::Name),
@@ -856,6 +985,12 @@ impl Browser {
         if targets.is_empty() && self.cursor < self.dir().entries.len() {
             targets.push(self.cursor);
         }
+        self.confirm_targets(permanent, targets)
+    }
+
+    /// Asks before a delete of `targets`, or returns the delete when the
+    /// question is off and the key is not a quick repeat.
+    fn confirm_targets(&mut self, permanent: bool, targets: Vec<usize>) -> Action {
         if targets.is_empty() {
             Action::None
         } else if *self.ask_mut(permanent) {
@@ -1137,7 +1272,7 @@ mod tests {
     use crate::tree::Kind;
 
     /// Three files in disk order. Sorted by size, `large` comes first.
-    fn in_disk_order() -> Dir {
+    pub(super) fn in_disk_order() -> Dir {
         let mut dir = Dir::default();
         dir.push(b"small", Kind::File, 4096, 4096, 0);
         dir.push(b"large", Kind::File, 1 << 20, 1 << 20, 0);
@@ -1146,18 +1281,18 @@ mod tests {
     }
 
     /// A browser on a root with one folder that was never opened.
-    fn browser_with(folder: Dir) -> Browser {
+    pub(super) fn browser_with(folder: Dir) -> Browser {
         let mut root = Dir::default();
         root.push(b"folder", Kind::Dir, 0, 0, 0);
         root.attach(0, folder, 0);
         let tree = Tree {
             path: PathBuf::from("/root"),
-            dir: Box::new(root),
+            dir: Arc::new(root),
         };
         Browser::new(tree, opts(), &Source::Scanned, None)
     }
 
-    fn opts() -> Options {
+    pub(super) fn opts() -> Options {
         Options {
             one_fs: false,
             threads: 1,
@@ -1175,7 +1310,7 @@ mod tests {
         }
         let tree = Tree {
             path: folder.to_path_buf(),
-            dir: Box::new(in_disk_order()),
+            dir: Arc::new(in_disk_order()),
         };
         Browser::new(tree, opts(), &Source::Scanned, None)
     }
@@ -1272,7 +1407,7 @@ mod tests {
         }
     }
 
-    fn key(c: char) -> KeyEvent {
+    pub(super) fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
@@ -1346,7 +1481,7 @@ mod tests {
     }
 
     /// The text of an 80x24 terminal, the smallest common size.
-    fn screen(browser: &mut Browser) -> String {
+    pub(super) fn screen(browser: &mut Browser) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| view::draw(frame, browser)).unwrap();
@@ -1364,7 +1499,7 @@ mod tests {
     }
 
     /// The row below the first row that contains `text`.
-    fn row_below<'a>(shown: &'a str, text: &str) -> &'a str {
+    pub(super) fn row_below<'a>(shown: &'a str, text: &str) -> &'a str {
         let mut rows = shown.lines().skip_while(|row| !row.contains(text));
         rows.next();
         rows.next().unwrap_or("")
@@ -1456,11 +1591,11 @@ mod tests {
         assert_eq!(describe(&Source::Scanned), None);
     }
 
-    type Seen = Arc<Mutex<Vec<Vec<PathBuf>>>>;
+    pub(super) type Seen = Arc<Mutex<Vec<Vec<PathBuf>>>>;
 
     /// A deleter that waits for one `()` per job, records its paths, and
     /// lets `act` do the work on each path. It never touches the Trash.
-    fn gated(
+    pub(super) fn gated(
         gate: mpsc::Receiver<()>,
         seen: &Seen,
         act: impl Fn(&Path) -> Result<(), String> + Send + 'static,
@@ -1486,7 +1621,7 @@ mod tests {
         })
     }
 
-    fn remove(path: &Path) -> Result<(), String> {
+    pub(super) fn remove(path: &Path) -> Result<(), String> {
         let result = if path.is_dir() {
             std::fs::remove_dir_all(path)
         } else {
@@ -1498,13 +1633,13 @@ mod tests {
         })
     }
 
-    fn file_name(path: &Path) -> &str {
+    pub(super) fn file_name(path: &Path) -> &str {
         path.file_name().and_then(|n| n.to_str()).unwrap()
     }
 
     /// A browser on real files, sorted by name, with a gated deleter. Each
     /// `()` on the returned sender lets one job run.
-    fn gated_browser(
+    pub(super) fn gated_browser(
         root: &Path,
         files: &[&str],
         act: impl Fn(&Path) -> Result<(), String> + Send + 'static,
@@ -1517,7 +1652,7 @@ mod tests {
         let dir = scan::scan(root, &opts(), &Progress::default()).unwrap();
         let tree = Tree {
             path: root.to_path_buf(),
-            dir: Box::new(dir),
+            dir: Arc::new(dir),
         };
         let (gate, rx) = mpsc::channel();
         let seen = Seen::default();
@@ -1527,22 +1662,22 @@ mod tests {
         (browser, gate, seen)
     }
 
-    fn go_to(browser: &mut Browser, name: &str) {
+    pub(super) fn go_to(browser: &mut Browser, name: &str) {
         point_at(browser, name);
         browser.open();
     }
 
-    fn point_at(browser: &mut Browser, name: &str) {
+    pub(super) fn point_at(browser: &mut Browser, name: &str) {
         browser.cursor = browser.dir().find(name.as_bytes()).unwrap();
     }
 
-    fn press(browser: &mut Browser, keys: &str) {
+    pub(super) fn press(browser: &mut Browser, keys: &str) {
         for c in keys.chars() {
             assert!(matches!(browser.step(key(c)), Step::Continue));
         }
     }
 
-    fn names(browser: &Browser) -> Vec<String> {
+    pub(super) fn names(browser: &Browser) -> Vec<String> {
         let dir = browser.dir();
         dir.entries
             .iter()

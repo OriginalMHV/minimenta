@@ -3,6 +3,7 @@ mod free_space;
 mod job_progress;
 mod progress;
 mod prompt;
+mod search_view;
 mod trash;
 mod view;
 
@@ -44,7 +45,7 @@ fn run_screens(
                 scan::set_tree_root(&path);
                 let tree = Tree {
                     path,
-                    dir: Box::new(scan.dir),
+                    dir: std::sync::Arc::new(scan.dir),
                 };
                 return browser::run(terminal, tree, opts, &scan.source, scan.session);
             }
